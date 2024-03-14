@@ -27,7 +27,8 @@ ANSWERS = [
     (" Amy", " Martin"),
 ]
 
-model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
+# model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
+model = LanguageModel("delphi-suite/v0-llama2-100k", device_map="cpu", dispatch=True)
 tokeniser = model.tokenizer
 
 
