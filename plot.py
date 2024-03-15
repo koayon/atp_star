@@ -6,7 +6,7 @@ from transformers import PreTrainedTokenizer
 
 
 def get_num_layers_heads(model: LanguageModel):
-    n_layers = len(model.transformer.h)
+    n_layers = len(model.transformer.h)  # type: ignore
     n_heads = model.transformer.h[0].attn.num_heads
     return n_layers, n_heads
 
@@ -60,7 +60,9 @@ def plot_attention_attributions(
 ):
     n_layers, n_heads = get_num_layers_heads(model)
 
-    HEAD_NAMES = [f"L{l}H{h}" for l in range(n_layers) for h in range(n_heads)]
+    HEAD_NAMES = [
+        f"L{l}H{h}" for l in range(n_layers) for h in range(n_heads)  #  type: ignore
+    ]  #  type: ignore
     HEAD_NAMES_SIGNED = [f"{name}{sign}" for name in HEAD_NAMES for sign in ["+", "-"]]
     HEAD_NAMES_QKV = [
         f"{name}{act_name}" for name in HEAD_NAMES for act_name in ["Q", "K", "V"]
