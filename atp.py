@@ -27,12 +27,15 @@ ANSWERS = [
     (" Amy", " Martin"),
 ]
 
-# model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
-model = LanguageModel("delphi-suite/v0-llama2-100k", device_map="cpu", dispatch=True)
+model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
+# model = LanguageModel("delphi-suite/v0-llama2-100k", device_map="mps", dispatch=True)
+# model = LanguageModel("roneneldan/TinyStories-1M", device_map="cpu", dispatch=True)
 tokeniser = model.tokenizer
 
 
-def prepare_tokens_and_indices(tokeniser: PreTrainedTokenizer):
+def prepare_tokens_and_indices(
+    tokeniser: PreTrainedTokenizer,
+) -> tuple[t.Tensor, t.Tensor, t.LongTensor]:
 
     clean_tokens: t.Tensor = tokeniser(PROMPTS, return_tensors="pt")["input_ids"]  # type: ignore
 
@@ -40,7 +43,7 @@ def prepare_tokens_and_indices(tokeniser: PreTrainedTokenizer):
         [(i + 1 if i % 2 == 0 else i - 1) for i in range(len(clean_tokens))]
     ]
 
-    answer_token_indices = t.tensor(
+    answer_token_indices: t.LongTensor = t.tensor(
         [
             [tokeniser(ANSWERS[i][j])["input_ids"][0] for j in range(2)]  # type: ignore
             for i in range(len(ANSWERS))
@@ -56,11 +59,16 @@ def run_atp(
     corrupted_tokens: t.Tensor,
     answer_token_indices: t.LongTensor,
 ):
+    print(model)
     with model.trace() as tracer:
-        with tracer.invoke(clean_tokens) as invoker:
+        with tracer.invoke((clean_tokens,)) as invoker:
             clean_logits = model.lm_head.output
 
-            clean_logit_diff = get_logit_diff(clean_logits, answer_token_indices).item()
+            clean_logit_diff = (
+                get_logit_diff(clean_logits, answer_token_indices).item().save()
+            )
+
+            # print(clean_logit_diff)
 
             clean_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
@@ -72,12 +80,16 @@ def run_atp(
                 for i in range(len(model.transformer.h))
             ]
 
-        with tracer.invoke(corrupted_tokens) as invoker:
+        with tracer.invoke((corrupted_tokens,)) as invoker:
             corrupted_logits = model.lm_head.output
 
-            corrupted_logit_diff = get_logit_diff(
-                corrupted_logits, answer_token_indices
-            ).item()
+            corrupted_logit_diff = (
+                get_logit_diff(corrupted_logits, answer_token_indices).item().save()
+            )
+
+            # print(corrupted_logit_diff)
+
+            # assert False
 
             corrupted_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
@@ -89,31 +101,38 @@ def run_atp(
                 for i in range(len(model.transformer.h))
             ]
 
-            clean_value = ioi_metric(
+            clean_ioi_score = ioi_metric(
                 clean_logits,
                 clean_logit_diff,
                 corrupted_logit_diff,
                 answer_token_indices,
             ).save()  # type: ignore
 
-            corrupted_value = ioi_metric(
+            corrupted_ioi_score = ioi_metric(
                 corrupted_logits,
                 clean_logit_diff,
                 corrupted_logit_diff,
                 answer_token_indices,
             ).save()  # type: ignore
 
-            (corrupted_value + clean_value).backward()
+            (corrupted_ioi_score + clean_ioi_score).backward()
 
     clean_cache = t.stack([value.value for value in clean_cache])
     clean_grad_cache = t.stack([value.value for value in clean_grad_cache])
     corrupted_cache = t.stack([value.value for value in corrupted_cache])
     corrupted_grad_cache = t.stack([value.value for value in corrupted_grad_cache])
 
-    print("Clean Value:", clean_value.value.item())
-    print("Corrupted Value:", corrupted_value.value.item())
+    print("Clean Value:", clean_ioi_score.value.item())
+    print("Corrupted Value:", corrupted_ioi_score.value.item())
 
-    return clean_cache, clean_grad_cache, corrupted_cache, corrupted_grad_cache
+    return (
+        clean_cache,
+        clean_grad_cache,
+        corrupted_cache,
+        corrupted_grad_cache,
+        clean_logit_diff,
+        corrupted_logit_diff,
+    )
 
 
 def create_attention_attr(
@@ -131,9 +150,21 @@ def main():
     clean_tokens, corrupted_tokens, answer_token_indices = prepare_tokens_and_indices(
         tokeniser
     )
-    clean_cache, clean_grad_cache, corrupted_cache, corrupted_grad_cache = run_atp(
-        model, clean_tokens, corrupted_tokens, answer_token_indices
-    )
+    print(clean_tokens[0])
+    print(corrupted_tokens[0])
+
+    (
+        clean_cache,
+        clean_grad_cache,
+        corrupted_cache,
+        corrupted_grad_cache,
+        clean_logit_diff,
+        corrupted_logit_diff,
+    ) = run_atp(model, clean_tokens, corrupted_tokens, answer_token_indices)
+
+    print(clean_logit_diff)
+    print(corrupted_logit_diff)
+
     attention_attr = create_attention_attr(clean_cache, clean_grad_cache)
 
     # plot_attention_attributions(
@@ -145,4 +176,5 @@ def main():
 
 
 if __name__ == "__main__":
-    print(model)
+    # print(model)
+    main()
