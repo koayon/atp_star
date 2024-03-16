@@ -11,6 +11,7 @@ class PromptSet:
     correct_answer: str
     incorrect_answer: str
     corrupted_prompt: str
+    off_distribution_prompt: str = "When Owen and Henry went to the shops, Jack gave the bag to"
 
 
 class PromptStore(list[PromptSet]):
@@ -18,14 +19,16 @@ class PromptStore(list[PromptSet]):
         super().__init__(prompts)
         self.tokeniser = tokeniser
 
+    def str_to_token_tensors(self, text: list[str]) -> Int[t.Tensor, "examples seq_len"]:
+        return t.tensor(self.tokeniser(text, return_tensors="pt")["input_ids"])
+
     @property
     def clean_prompts(self) -> list[str]:
         return [prompt.clean_prompt for prompt in self]
 
     @property
     def clean_tokens(self) -> Int[t.Tensor, "examples"]:
-        clean_tokens = self.tokeniser(self.clean_prompts, return_tensors="pt")["input_ids"]
-        return t.tensor(clean_tokens)
+        return self.str_to_token_tensors(self.clean_prompts)
 
     @property
     def corrupted_prompts(self) -> list[str]:
@@ -33,8 +36,15 @@ class PromptStore(list[PromptSet]):
 
     @property
     def corrupted_tokens(self) -> Int[t.Tensor, "examples"]:
-        corrupted_tokens = self.tokeniser(self.corrupted_prompts, return_tensors="pt")["input_ids"]
-        return t.tensor(corrupted_tokens)
+        return self.str_to_token_tensors(self.corrupted_prompts)
+
+    @property
+    def off_distribution_prompts(self) -> list[str]:
+        return [prompt.off_distribution_prompt for prompt in self]
+
+    @property
+    def off_distribution_tokens(self) -> Int[t.Tensor, "examples"]:
+        return self.str_to_token_tensors(self.off_distribution_prompts)
 
     @property
     def correct_answers(self) -> list[str]:
@@ -46,31 +56,40 @@ class PromptStore(list[PromptSet]):
 
     @property
     def answer_token_indices(self) -> Int[t.Tensor, "examples 2"]:
-        correct_answer_token_ids = self.tokeniser(self.correct_answers, return_tensors="pt")[
-            "input_ids"
-        ]  # examples, 1
-        incorrect_answer_token_ids = self.tokeniser(self.incorrect_answers, return_tensors="pt")[
-            "input_ids"
-        ]  # examples, 1
+        correct_answer_token_ids = self.str_to_token_tensors(self.correct_answers)  # examples, 1
+        incorrect_answer_token_ids = self.str_to_token_tensors(
+            self.incorrect_answers
+        )  # examples, 1
 
         answer_token_indices = t.cat(
-            [t.tensor(correct_answer_token_ids), t.tensor(incorrect_answer_token_ids)], dim=1
+            [correct_answer_token_ids, incorrect_answer_token_ids], dim=1
         )  # examples, 2
         return answer_token_indices
 
     def prepare_tokens_and_indices(
         self,
-    ) -> tuple[Int[t.Tensor, "examples"], Int[t.Tensor, "examples"], Int[t.Tensor, "examples 2"]]:
+    ) -> tuple[
+        Int[t.Tensor, "examples"],
+        Int[t.Tensor, "examples"],
+        Int[t.Tensor, "examples"],
+        Int[t.Tensor, "examples 2"],
+    ]:
         """Prepare the tokens and indices for the IOI task.
 
         Returns
         -------
         clean_tokens : Int[t.Tensor, "examples"]
         corrupted_tokens : Int[t.Tensor, "examples"]
+        off_distribution_tokens : Int[t.Tensor, "examples"]
         answer_token_indices : Int[t.Tensor, "examples, 2"]
         """
 
-        return self.clean_tokens, self.corrupted_tokens, self.answer_token_indices
+        return (
+            self.clean_tokens,
+            self.corrupted_tokens,
+            self.off_distribution_tokens,
+            self.answer_token_indices,
+        )
 
 
 def build_prompt_store(tokeniser: PreTrainedTokenizer) -> PromptStore:
@@ -110,4 +129,9 @@ if __name__ == "__main__":
 
     tokeniser = GPT2Tokenizer.from_pretrained("gpt2")
     prompt_store = build_prompt_store(tokeniser)
-    clean_tokens, corrupted_tokens, answer_token_indices = prompt_store.prepare_tokens_and_indices()
+    clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices = (
+        prompt_store.prepare_tokens_and_indices()
+    )
+
+    print(clean_tokens)
+    print(off_distribution_tokens)
