@@ -1,25 +1,33 @@
 import torch as t
 from jaxtyping import Float, Int
+from loguru import logger
 from nnsight import LanguageModel
 
 
 def ioi_metric(
-    logits: Float[t.Tensor, "batch seq_len vocab"],
-    clean_baseline_logit_diff: Float[t.Tensor, "batch"],
-    corrupted_baseline_logit_diff: Float[t.Tensor, "batch"],
-    answer_token_indices: Int[t.Tensor, "batch 2"],
-) -> Float[t.Tensor, "batch"]:
-    numerator = get_logit_diff(logits, answer_token_indices) - corrupted_baseline_logit_diff
-    denominator = clean_baseline_logit_diff - corrupted_baseline_logit_diff
+    clean_logit_diff: Float[t.Tensor, "1"],
+    corrupted_logit_diff: Float[t.Tensor, "1"],
+    off_distribution_logit_diff: Float[t.Tensor, "1"],
+) -> Float[t.Tensor, "1"]:
+    """Calculates the IOI metric for a given batch of examples.
+    Returns a scalar value."""
+
+    numerator = clean_logit_diff - corrupted_logit_diff
+    denominator = t.abs(clean_logit_diff - off_distribution_logit_diff)
+    # denominator = off_distribution_logit_diff
+
+    # print("Numerator", numerator)
+    # print("Denominator", denominator)
 
     normalised_ioi_metric = numerator / denominator
+    # normalised_ioi_metric = numerator
     return normalised_ioi_metric
 
 
-def get_logit_diff(
+def mean_logit_diff(
     logits: t.Tensor,
     answer_token_indices: Int[t.Tensor, "batch 2"],
-) -> Float[t.Tensor, "batch"]:
+) -> Float[t.Tensor, "1"]:
     """Compares the difference between the logits of the correct and incorrect answers.
     E.g. what's the difference between the answer being John or Mary in the IOI task?
 
@@ -41,12 +49,12 @@ def get_logit_diff(
     elif len(logits.shape) == 4:  # _, batch, seq_len, vocab
         logits = logits[0, :, -1, :]
 
-    print("logits.shape", logits.shape)
-    print("answer_token_indices.shape", answer_token_indices.shape)
+    correct_logits = logits.gather(1, answer_token_indices[:, 0].unsqueeze(1))  # examples 1
+    incorrect_logits = logits.gather(1, answer_token_indices[:, 1].unsqueeze(1))  # examples 1
 
-    correct_logits = logits.gather(1, answer_token_indices[:, 0].unsqueeze(1))
-    incorrect_logits = logits.gather(1, answer_token_indices[:, 1].unsqueeze(1))
-    return (correct_logits - incorrect_logits).mean()
+    logit_diffs = (correct_logits - incorrect_logits).squeeze(1)  # examples
+    mean_logit_diff = t.mean(logit_diffs)  # scalar
+    return mean_logit_diff
 
 
 def get_num_layers_heads(model: LanguageModel) -> tuple[int, int, list[str]]:
