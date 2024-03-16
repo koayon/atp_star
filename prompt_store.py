@@ -45,21 +45,22 @@ class PromptStore(list[PromptSet]):
         return [prompt.incorrect_answer for prompt in self]
 
     @property
-    def answer_token_indices(self) -> Int[t.Tensor, "examples, 2"]:
+    def answer_token_indices(self) -> Int[t.Tensor, "examples 2"]:
         correct_answer_token_ids = self.tokeniser(self.correct_answers, return_tensors="pt")[
             "input_ids"
-        ]  # examples
+        ]  # examples, 1
         incorrect_answer_token_ids = self.tokeniser(self.incorrect_answers, return_tensors="pt")[
             "input_ids"
-        ]  # examples
-        answer_token_indices = t.stack(
+        ]  # examples, 1
+
+        answer_token_indices = t.cat(
             [t.tensor(correct_answer_token_ids), t.tensor(incorrect_answer_token_ids)], dim=1
         )  # examples, 2
         return answer_token_indices
 
     def prepare_tokens_and_indices(
         self,
-    ) -> tuple[Int[t.Tensor, "examples"], Int[t.Tensor, "examples"], Int[t.Tensor, "examples, 2"]]:
+    ) -> tuple[Int[t.Tensor, "examples"], Int[t.Tensor, "examples"], Int[t.Tensor, "examples 2"]]:
         """Prepare the tokens and indices for the IOI task.
 
         Returns
@@ -102,3 +103,11 @@ def build_prompt_store(tokeniser: PreTrainedTokenizer) -> PromptStore:
         ],
         tokeniser=tokeniser,
     )
+
+
+if __name__ == "__main__":
+    from transformers import GPT2Tokenizer
+
+    tokeniser = GPT2Tokenizer.from_pretrained("gpt2")
+    prompt_store = build_prompt_store(tokeniser)
+    clean_tokens, corrupted_tokens, answer_token_indices = prompt_store.prepare_tokens_and_indices()
