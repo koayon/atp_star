@@ -19,15 +19,42 @@ def run_atp(
     corrupted_tokens: Int[t.Tensor, "examples"],
     answer_token_indices: Int[t.Tensor, "examples, 2"],
 ):
-    print(model)
+    """Run the ATP algorithm (Nanda 2022).
+    Optionally specify improvements to the algorithm (known as AtP*)
+    which come from [Kramar et al 2024](https://arxiv.org/pdf/2403.00745.pdf).
+
+    Attribution Patching (AtP) is introduced as a quick approximation to the more
+    precise _Activation Patching_ (AcP) which details the contribution of each component
+    to some metric (e.g. NLL loss, IOI score, etc.). It works by taking the first order
+    Taylor approximation of the contribution c(n).
+
+    Activation Patching is defined as the absolute value of the expected impact on the
+    metric of resampling the node n with the corrupted (or noise) distribution.
+
+    Parameters
+    ----------
+    model : LanguageModel
+    clean_tokens : Int[t.Tensor, "examples"]
+    corrupted_tokens : Int[t.Tensor, "examples"]
+    answer_token_indices : Int[t.Tensor, "examples, 2"]
+
+    Returns
+    -------
+    _type_
+        _description_
+    """
     with model.trace() as tracer:
         with tracer.invoke((clean_tokens,)) as invoker:
-            clean_logits = model.lm_head.output
 
-            clean_logit_diff = get_logit_diff(clean_logits, answer_token_indices).item().save()  # type: ignore
+            # Calculate L(M(x_clean))
+            clean_logits: Float[t.Tensor, "examples vocab"] = (
+                model.lm_head.output
+            )  # type: ignore # M(x_clean)
+            clean_logit_diff: Float[t.Tensor, "examples"] = get_logit_diff(clean_logits, answer_token_indices).item().save()  # type: ignore
 
             # print(clean_logit_diff)
 
+            # Cache the clean activations and gradients for all the nodes
             clean_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
                 for i in range(len(model.transformer.h))  # type: ignore
@@ -39,16 +66,16 @@ def run_atp(
             ]
 
         with tracer.invoke((corrupted_tokens,)) as invoker:
-            corrupted_logits = model.lm_head.output
 
-            corrupted_logit_diff = (
+            # Calculate L(M(x_corrupted))
+            corrupted_logits: Float[t.Tensor, "examples vocab"] = model.lm_head.output  # type: ignore
+            corrupted_logit_diff: Float[t.Tensor, "examples"] = (
                 get_logit_diff(corrupted_logits, answer_token_indices).item().save()  # type: ignore
             )
 
             # print(corrupted_logit_diff)
 
-            # assert False
-
+            # Cache the corrupted activations and gradients for all the nodes
             corrupted_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
                 for i in range(len(model.transformer.h))  # type: ignore
@@ -60,14 +87,14 @@ def run_atp(
             ]
 
             clean_ioi_score = ioi_metric(
-                clean_logits,  # type: ignore
+                clean_logits,
                 clean_logit_diff,
                 corrupted_logit_diff,
                 answer_token_indices,
             ).save()  # type: ignore
 
             corrupted_ioi_score = ioi_metric(
-                corrupted_logits,  # type: ignore
+                corrupted_logits,
                 clean_logit_diff,
                 corrupted_logit_diff,
                 answer_token_indices,

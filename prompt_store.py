@@ -65,11 +65,8 @@ class PromptStore(list[PromptSet]):
         Returns
         -------
         clean_tokens : Int[t.Tensor, "examples"]
-            _description_
         corrupted_tokens : Int[t.Tensor, "examples"]
-            _description_
         answer_token_indices : Int[t.Tensor, "examples, 2"]
-            _description_
         """
 
         return self.clean_tokens, self.corrupted_tokens, self.answer_token_indices

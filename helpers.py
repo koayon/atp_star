@@ -4,15 +4,13 @@ from jaxtyping import Float, Int
 
 def ioi_metric(
     logits: Float[t.Tensor, "batch seq_len vocab"],
-    clean_baseline_logit_diff: float,
-    corrupted_baseline_logit_diff: float,
+    clean_baseline_logit_diff: Float[t.Tensor, "batch"],
+    corrupted_baseline_logit_diff: Float[t.Tensor, "batch"],
     answer_token_indices: Int[t.Tensor, "batch 2"],
 ) -> Float[t.Tensor, "batch"]:
     # logger.debug(clean_baseline_logit_diff)
     # logger.debug(corrupted_baseline_logit_diff)
-    numerator = (
-        get_logit_diff(logits, answer_token_indices) - corrupted_baseline_logit_diff
-    )
+    numerator = get_logit_diff(logits, answer_token_indices) - corrupted_baseline_logit_diff
     denominator = clean_baseline_logit_diff - corrupted_baseline_logit_diff
 
     normalised_ioi_metric = numerator / denominator
