@@ -2,39 +2,15 @@ import torch as t
 from einops import rearrange
 from jaxtyping import Float, Int
 from nnsight import LanguageModel
-from transformers import PreTrainedTokenizer
 
 from helpers import get_logit_diff, ioi_metric
 from plot import plot_attention_attributions
-from prompt_store import PROMPT_STORE
+from prompt_store import build_prompt_store
 
 model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
 # model = LanguageModel("delphi-suite/v0-llama2-100k", device_map="mps", dispatch=True)
 # model = LanguageModel("roneneldan/TinyStories-1M", device_map="cpu", dispatch=True)
 tokeniser = model.tokenizer
-
-
-def prepare_tokens_and_indices(
-    tokeniser: PreTrainedTokenizer,
-) -> tuple[Int[t.Tensor, "examples"], Int[t.Tensor, "examples"], Int[t.Tensor, "examples, 2"]]:
-
-    clean_tokens = t.tensor(tokeniser(PROMPT_STORE.clean_prompts, return_tensors="pt")["input_ids"])
-    corrupted_tokens = t.tensor(
-        tokeniser(PROMPT_STORE.corrupted_prompts, return_tensors="pt")["input_ids"]
-    )
-
-    correct_answer_token_ids = t.tensor(
-        tokeniser(PROMPT_STORE.correct_answers, return_tensors="pt")["input_ids"]
-    )  # examples
-    incorrect_answer_token_ids = t.tensor(
-        tokeniser(PROMPT_STORE.incorrect_answers, return_tensors="pt")["input_ids"]
-    )  # examples
-
-    answer_token_indices = t.stack(
-        [correct_answer_token_ids, incorrect_answer_token_ids], dim=1
-    )  # examples, 2
-
-    return clean_tokens, corrupted_tokens, answer_token_indices
 
 
 def run_atp(
@@ -127,7 +103,8 @@ def create_attention_attr(clean_cache: t.Tensor, clean_grad_cache: t.Tensor) -> 
 
 
 def main():
-    clean_tokens, corrupted_tokens, answer_token_indices = prepare_tokens_and_indices(tokeniser)
+    prompt_store = build_prompt_store(tokeniser)
+    clean_tokens, corrupted_tokens, answer_token_indices = prompt_store.prepare_tokens_and_indices()
     print(clean_tokens[0])
     print(corrupted_tokens[0])
 
