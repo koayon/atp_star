@@ -1,5 +1,5 @@
 import torch as t
-from einops import rearrange
+from einops import einsum, rearrange
 from jaxtyping import Float, Int
 from nnsight import LanguageModel
 
@@ -13,12 +13,32 @@ model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
 tokeniser = model.tokenizer
 
 
+def atp_component_contribution(
+    node_clean_activation: Float[t.Tensor, "examples head seq_len seq_len"],
+    node_corrupted_activation: Float[t.Tensor, "examples head seq_len seq_len"],
+    grad_wrt_node: Float[t.Tensor, "examples head seq_len seq_len"],
+) -> Float[t.Tensor, "head seq_len seq_len"]:
+    """Calculates the intervention effect of a node in the transformer (here attention)."""
+
+    # Calculate the intervention effect I_{AtP}(n; x_clean, x_corrupted)
+    activation_diff = node_corrupted_activation - node_clean_activation
+    intervention_effect = einsum(
+        activation_diff,
+        grad_wrt_node,
+        "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1 seq_len2",
+    )
+
+    # Calculate the contribution c_{AtP}(n) = ExpectedValue(|I_{AtP}(n; x_clean, x_corrupted)|)
+    contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len seq_len
+    return contribution
+
+
 def run_atp(
     model: LanguageModel,
     clean_tokens: Int[t.Tensor, "examples"],
     corrupted_tokens: Int[t.Tensor, "examples"],
-    answer_token_indices: Int[t.Tensor, "examples, 2"],
-):
+    answer_token_indices: Int[t.Tensor, "examples 2"],
+) -> list[t.Tensor]:
     """Run the ATP algorithm (Nanda 2022).
     Optionally specify improvements to the algorithm (known as AtP*)
     which come from [Kramar et al 2024](https://arxiv.org/pdf/2403.00745.pdf).
@@ -40,14 +60,51 @@ def run_atp(
 
     Returns
     -------
-    _type_
-        _description_
+    atp_component_contributions : list[float]
+        The approximate contribution of each component to the metric, as given by the AtP algorithm.
+    """
+
+    (
+        clean_cache,
+        corrupted_cache,
+        clean_grad_cache,
+    ) = get_atp_caches(model, clean_tokens, corrupted_tokens, answer_token_indices)
+
+    atp_component_contributions: list[t.Tensor] = [
+        atp_component_contribution(clean_cache[i], corrupted_cache[i], clean_grad_cache[i])
+        for i in range(len(clean_cache))
+    ]  # layer list[head]
+    return atp_component_contributions
+
+
+def get_atp_caches(
+    model: LanguageModel,
+    clean_tokens: Int[t.Tensor, "examples"],
+    corrupted_tokens: Int[t.Tensor, "examples"],
+    answer_token_indices: Int[t.Tensor, "examples 2"],
+) -> tuple[list[t.Tensor], list[t.Tensor], list[t.Tensor]]:
+    """Run the model forward passes on the clean and corrupted tokens and cache the activations.
+    We also run a backward pass to cache the gradients on the clean tokens.
+
+    Parameters
+    ----------
+    model : LanguageModel
+    clean_tokens : Int[t.Tensor, "examples"]
+    corrupted_tokens : Int[t.Tensor, "examples"]
+    answer_token_indices : Int[t.Tensor, "examples, 2"]
+
+    Returns
+    -------
+    clean_cache : list[t.Tensor]
+    corrupted_cache : list[t.Tensor]
+    clean_grad_cache : list[t.Tensor]
+
     """
     with model.trace() as tracer:
         with tracer.invoke((clean_tokens,)) as invoker:
 
             # Calculate L(M(x_clean))
-            clean_logits: Float[t.Tensor, "examples vocab"] = (
+            clean_logits: Float[t.Tensor, "examples seq_len vocab"] = (
                 model.lm_head.output
             )  # type: ignore # M(x_clean)
             clean_logit_diff: Float[t.Tensor, "examples"] = get_logit_diff(clean_logits, answer_token_indices).item().save()  # type: ignore
@@ -58,6 +115,7 @@ def run_atp(
             clean_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
                 for i in range(len(model.transformer.h))  # type: ignore
+                # batch head_index seq_len seq_len
             ]
 
             clean_grad_cache = [
@@ -68,7 +126,7 @@ def run_atp(
         with tracer.invoke((corrupted_tokens,)) as invoker:
 
             # Calculate L(M(x_corrupted))
-            corrupted_logits: Float[t.Tensor, "examples vocab"] = model.lm_head.output  # type: ignore
+            corrupted_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output  # type: ignore
             corrupted_logit_diff: Float[t.Tensor, "examples"] = (
                 get_logit_diff(corrupted_logits, answer_token_indices).item().save()  # type: ignore
             )
@@ -81,73 +139,33 @@ def run_atp(
                 for i in range(len(model.transformer.h))  # type: ignore
             ]
 
-            corrupted_grad_cache = [
-                model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
-                for i in range(len(model.transformer.h))  # type: ignore
-            ]
-
             clean_ioi_score = ioi_metric(
                 clean_logits,
                 clean_logit_diff,
                 corrupted_logit_diff,
                 answer_token_indices,
-            ).save()  # type: ignore
+            )
 
-            corrupted_ioi_score = ioi_metric(
-                corrupted_logits,
-                clean_logit_diff,
-                corrupted_logit_diff,
-                answer_token_indices,
-            ).save()  # type: ignore
+            clean_ioi_score.backward()
 
-            (corrupted_ioi_score + clean_ioi_score).backward()
-
-    clean_cache = t.stack([value.value for value in clean_cache])
-    clean_grad_cache = t.stack([value.value for value in clean_grad_cache])
-    corrupted_cache = t.stack([value.value for value in corrupted_cache])
-    corrupted_grad_cache = t.stack([value.value for value in corrupted_grad_cache])
-
-    print("Clean Value:", clean_ioi_score.value.item())
-    print("Corrupted Value:", corrupted_ioi_score.value.item())
+    clean_cache = [value.value for value in clean_cache]
+    clean_grad_cache = [value.value for value in clean_grad_cache]
+    corrupted_cache = [value.value for value in corrupted_cache]
 
     return (
         clean_cache,
-        clean_grad_cache,
         corrupted_cache,
-        corrupted_grad_cache,
-        clean_logit_diff,
-        corrupted_logit_diff,
+        clean_grad_cache,
     )
-
-
-def create_attention_attr(clean_cache: t.Tensor, clean_grad_cache: t.Tensor) -> t.Tensor:
-    attention_attr = clean_grad_cache * clean_cache
-    attention_attr = rearrange(
-        attention_attr,
-        "layer batch head_index dest src -> batch layer head_index dest src",
-    )
-    return attention_attr
 
 
 def main():
     prompt_store = build_prompt_store(tokeniser)
     clean_tokens, corrupted_tokens, answer_token_indices = prompt_store.prepare_tokens_and_indices()
-    print(clean_tokens[0])
-    print(corrupted_tokens[0])
 
-    (
-        clean_cache,
-        clean_grad_cache,
-        corrupted_cache,
-        corrupted_grad_cache,
-        clean_logit_diff,
-        corrupted_logit_diff,
-    ) = run_atp(model, clean_tokens, corrupted_tokens, answer_token_indices)
-
-    print(clean_logit_diff)
-    print(corrupted_logit_diff)
-
-    attention_attr = create_attention_attr(clean_cache, clean_grad_cache)
+    atp_component_contributions = run_atp(
+        model, clean_tokens, corrupted_tokens, answer_token_indices
+    )
 
     # plot_attention_attributions(
     #     attention_attr,
