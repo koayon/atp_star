@@ -1,31 +1,12 @@
 import torch as t
 from einops import rearrange
+from jaxtyping import Float, Int
 from nnsight import LanguageModel
 from transformers import PreTrainedTokenizer
 
 from helpers import get_logit_diff, ioi_metric
 from plot import plot_attention_attributions
-
-PROMPTS = [
-    "When John and Mary went to the shops, John gave the bag to",
-    "When John and Mary went to the shops, Mary gave the bag to",
-    "When Tom and James went to the park, James gave the ball to",
-    "When Tom and James went to the park, Tom gave the ball to",
-    "When Dan and Sid went to the shops, Sid gave an apple to",
-    "When Dan and Sid went to the shops, Dan gave an apple to",
-    "After Martin and Amy went to the park, Amy gave a drink to",
-    "After Martin and Amy went to the park, Martin gave a drink to",
-]
-ANSWERS = [
-    (" Mary", " John"),
-    (" John", " Mary"),
-    (" Tom", " James"),
-    (" James", " Tom"),
-    (" Dan", " Sid"),
-    (" Sid", " Dan"),
-    (" Martin", " Amy"),
-    (" Amy", " Martin"),
-]
+from prompt_store import PROMPT_STORE
 
 model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
 # model = LanguageModel("delphi-suite/v0-llama2-100k", device_map="mps", dispatch=True)
@@ -35,56 +16,57 @@ tokeniser = model.tokenizer
 
 def prepare_tokens_and_indices(
     tokeniser: PreTrainedTokenizer,
-) -> tuple[t.Tensor, t.Tensor, t.LongTensor]:
+) -> tuple[Int[t.Tensor, "examples"], Int[t.Tensor, "examples"], Int[t.Tensor, "examples, 2"]]:
 
-    clean_tokens: t.Tensor = tokeniser(PROMPTS, return_tensors="pt")["input_ids"]  # type: ignore
-
-    corrupted_tokens = clean_tokens[
-        [(i + 1 if i % 2 == 0 else i - 1) for i in range(len(clean_tokens))]
-    ]
-
-    answer_token_indices: t.LongTensor = t.tensor(
-        [
-            [tokeniser(ANSWERS[i][j])["input_ids"][0] for j in range(2)]  # type: ignore
-            for i in range(len(ANSWERS))
-        ]
+    clean_tokens = t.tensor(tokeniser(PROMPT_STORE.clean_prompts, return_tensors="pt")["input_ids"])
+    corrupted_tokens = t.tensor(
+        tokeniser(PROMPT_STORE.corrupted_prompts, return_tensors="pt")["input_ids"]
     )
+
+    correct_answer_token_ids = t.tensor(
+        tokeniser(PROMPT_STORE.correct_answers, return_tensors="pt")["input_ids"]
+    )  # examples
+    incorrect_answer_token_ids = t.tensor(
+        tokeniser(PROMPT_STORE.incorrect_answers, return_tensors="pt")["input_ids"]
+    )  # examples
+
+    answer_token_indices = t.stack(
+        [correct_answer_token_ids, incorrect_answer_token_ids], dim=1
+    )  # examples, 2
 
     return clean_tokens, corrupted_tokens, answer_token_indices
 
 
 def run_atp(
     model: LanguageModel,
-    clean_tokens: t.Tensor,
-    corrupted_tokens: t.Tensor,
-    answer_token_indices: t.LongTensor,
+    clean_tokens: Int[t.Tensor, "examples"],
+    corrupted_tokens: Int[t.Tensor, "examples"],
+    answer_token_indices: Int[t.Tensor, "examples, 2"],
 ):
     print(model)
     with model.trace() as tracer:
         with tracer.invoke((clean_tokens,)) as invoker:
             clean_logits = model.lm_head.output
 
-            clean_logit_diff = (
-                get_logit_diff(clean_logits, answer_token_indices).item().save()
-            )
+            clean_logit_diff = get_logit_diff(clean_logits, answer_token_indices).item().save()  # type: ignore
 
             # print(clean_logit_diff)
 
             clean_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
-                for i in range(len(model.transformer.h))
+                for i in range(len(model.transformer.h))  # type: ignore
             ]
 
             clean_grad_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
-                for i in range(len(model.transformer.h))
+                for i in range(len(model.transformer.h))  # type: ignore
             ]
 
         with tracer.invoke((corrupted_tokens,)) as invoker:
             corrupted_logits = model.lm_head.output
 
             corrupted_logit_diff = (
-                get_logit_diff(corrupted_logits, answer_token_indices).item().save()
+                get_logit_diff(corrupted_logits, answer_token_indices).item().save()  # type: ignore
             )
 
             # print(corrupted_logit_diff)
@@ -93,23 +75,23 @@ def run_atp(
 
             corrupted_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
-                for i in range(len(model.transformer.h))
+                for i in range(len(model.transformer.h))  # type: ignore
             ]
 
             corrupted_grad_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
-                for i in range(len(model.transformer.h))
+                for i in range(len(model.transformer.h))  # type: ignore
             ]
 
             clean_ioi_score = ioi_metric(
-                clean_logits,
+                clean_logits,  # type: ignore
                 clean_logit_diff,
                 corrupted_logit_diff,
                 answer_token_indices,
             ).save()  # type: ignore
 
             corrupted_ioi_score = ioi_metric(
-                corrupted_logits,
+                corrupted_logits,  # type: ignore
                 clean_logit_diff,
                 corrupted_logit_diff,
                 answer_token_indices,
@@ -135,9 +117,7 @@ def run_atp(
     )
 
 
-def create_attention_attr(
-    clean_cache: t.Tensor, clean_grad_cache: t.Tensor
-) -> t.Tensor:
+def create_attention_attr(clean_cache: t.Tensor, clean_grad_cache: t.Tensor) -> t.Tensor:
     attention_attr = clean_grad_cache * clean_cache
     attention_attr = rearrange(
         attention_attr,
@@ -147,9 +127,7 @@ def create_attention_attr(
 
 
 def main():
-    clean_tokens, corrupted_tokens, answer_token_indices = prepare_tokens_and_indices(
-        tokeniser
-    )
+    clean_tokens, corrupted_tokens, answer_token_indices = prepare_tokens_and_indices(tokeniser)
     print(clean_tokens[0])
     print(corrupted_tokens[0])
 
