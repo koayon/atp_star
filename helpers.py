@@ -1,5 +1,6 @@
 import torch as t
 from jaxtyping import Float, Int
+from nnsight import LanguageModel
 
 
 def ioi_metric(
@@ -8,8 +9,6 @@ def ioi_metric(
     corrupted_baseline_logit_diff: Float[t.Tensor, "batch"],
     answer_token_indices: Int[t.Tensor, "batch 2"],
 ) -> Float[t.Tensor, "batch"]:
-    # logger.debug(clean_baseline_logit_diff)
-    # logger.debug(corrupted_baseline_logit_diff)
     numerator = get_logit_diff(logits, answer_token_indices) - corrupted_baseline_logit_diff
     denominator = clean_baseline_logit_diff - corrupted_baseline_logit_diff
 
@@ -48,3 +47,14 @@ def get_logit_diff(
     correct_logits = logits.gather(1, answer_token_indices[:, 0].unsqueeze(1))
     incorrect_logits = logits.gather(1, answer_token_indices[:, 1].unsqueeze(1))
     return (correct_logits - incorrect_logits).mean()
+
+
+def get_num_layers_heads(model: LanguageModel) -> tuple[int, int, list[str]]:
+    num_layers = len(model.transformer.h)  # type: ignore
+    num_heads = int(model.transformer.h[0].attn.num_heads)  # type: ignore
+
+    head_names = [f"L{l}H{h}" for l in range(num_layers) for h in range(num_heads)]
+    head_names_signed = [f"{name}{sign}" for name in head_names for sign in ["+", "-"]]
+    # HEAD_NAMES_QKV = [f"{name}{act_name}" for name in HEAD_NAMES for act_name in ["Q", "K", "V"]]
+
+    return num_layers, num_heads, head_names_signed
