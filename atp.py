@@ -6,8 +6,8 @@ from jaxtyping import Float, Int
 from loguru import logger
 from nnsight import LanguageModel
 
-from helpers import ioi_metric, mean_logit_diff
-from plot import plot_attention_attributions
+from helpers import get_num_layers_heads, ioi_metric, mean_logit_diff
+from plot import plot_attention_attributions, plot_single_attention_pattern
 from prompt_store import build_prompt_store
 
 model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
@@ -26,9 +26,7 @@ def atp_component_contribution(
     # Calculate the intervention effect I_{AtP}(n; x_clean, x_corrupted)
     activation_diff = node_corrupted_activation - node_clean_activation
 
-    logger.info(activation_diff.max())
-    logger.info(node_corrupted_activation.abs().mean())
-    logger.info(node_clean_activation.abs().mean())
+    logger.debug(activation_diff.max())
 
     intervention_effect = einsum(
         activation_diff,
@@ -113,7 +111,7 @@ def get_atp_caches(
 
     """
     with model.trace() as tracer:
-        with tracer.invoke((clean_tokens,)) as clean_invoker:
+        with tracer.invoke(clean_tokens) as clean_invoker:
 
             # Calculate L(M(x_clean))
             clean_logits: Float[t.Tensor, "examples seq_len vocab"] = (
@@ -122,10 +120,6 @@ def get_atp_caches(
             clean_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
                 clean_logits, answer_token_indices
             ).save()
-
-            # print(type(clean_logit_diff))
-
-            # print(clean_logit_diff)
 
             # Cache the clean activations and gradients for all the nodes
             clean_cache = [
@@ -139,7 +133,7 @@ def get_atp_caches(
                 for i in range(len(model.transformer.h))  # type: ignore
             ]
 
-        with tracer.invoke((corrupted_tokens,)) as corrupted_invoker:
+        with tracer.invoke(corrupted_tokens) as corrupted_invoker:
 
             # Calculate L(M(x_corrupted))
             corrupted_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output  # type: ignore
@@ -147,15 +141,13 @@ def get_atp_caches(
                 corrupted_logits, answer_token_indices
             ).save()
 
-            # print(corrupted_logit_diff)
-
             # Cache the corrupted activations and gradients for all the nodes
             corrupted_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
                 for i in range(len(model.transformer.h))  # type: ignore
             ]
 
-        with tracer.invoke((off_distribution_tokens,)) as off_distribution_invoker:
+        with tracer.invoke(off_distribution_tokens) as off_distribution_invoker:
 
             # Calculate L(M(x_corrupted))
             off_distribution_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output  # type: ignore
@@ -169,17 +161,13 @@ def get_atp_caches(
 
             ioi_score.backward()
 
-    print(clean_logit_diff)
-    print(corrupted_logit_diff)
-    print(off_distribution_logit_diff)
+    logger.debug(clean_logit_diff)
+    logger.debug(corrupted_logit_diff)
+    logger.debug(off_distribution_logit_diff)
 
     clean_cache = [value.value for value in clean_cache]
     clean_grad_cache = [value.value for value in clean_grad_cache]
     corrupted_cache = [value.value for value in corrupted_cache]
-
-    logger.debug(clean_cache[2][3])
-    logger.debug(clean_grad_cache[2][3])
-    logger.debug(corrupted_cache[2][3])
 
     return (
         clean_cache,
@@ -197,31 +185,34 @@ def main():
         prompt_store.prepare_tokens_and_indices()
     )
 
-    clean_cache, corrupted_cache, clean_grad_cache = get_atp_caches(
+    atp_component_contributions = run_atp(
         model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
     )
 
-    logger.info(clean_cache[0].shape)
-    logger.info(corrupted_cache[0].shape)
-    logger.info(clean_grad_cache[0].shape)
+    logger.debug(atp_component_contributions[-1].shape)
+    logger.debug(len(atp_component_contributions))
 
-    # atp_component_contributions = run_atp(
-    #     model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
-    # )
+    logger.debug(atp_component_contributions[-1][-2])
+    attn_contributions_tensor = t.stack(
+        atp_component_contributions, dim=0
+    )  # layer head seq_len seq_len
+    logger.debug(t.max(attn_contributions_tensor, dim=(0)))
 
-    # logger.debug(atp_component_contributions[-1].shape)
-    # logger.debug(len(atp_component_contributions))
+    logger.info(attn_contributions_tensor.shape)
 
-    # logger.debug(atp_component_contributions[-1][-2])
-    # contributions_tensor = t.stack(atp_component_contributions, dim=0)
-    # logger.debug(t.max(contributions_tensor, dim=(0)))
+    clean_token_strs = [tokeniser.decode(token) for token in clean_tokens]
+
+    _num_layers, _num_heads, head_names_signed = get_num_layers_heads(model)
 
     # plot_attention_attributions(
-    #     attention_attr,
-    #     clean_tokens,
-    #     index=0,
-    #     title="Attention Attribution for first sequence",
+    #     attention_attr=attn_contributions_tensor,
+    #     token_strs=clean_token_strs,
+    #     head_names_signed=head_names_signed,
     # )
+
+    plot_single_attention_pattern(attn_contributions_tensor[0, 0, :, :])
+
+    # print(html_plot)
 
 
 if __name__ == "__main__":
