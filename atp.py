@@ -20,15 +20,27 @@ class AttentionLayerCache:
     attn_probabilities: t.Tensor
     queries: t.Tensor
     keys: t.Tensor
-    grad_probabilities: Optional[t.Tensor]
+    grad_attn_probabilities: Optional[t.Tensor]
 
 
 def atp_component_contribution(
-    node_clean_activation: Float[t.Tensor, "examples head seq_len seq_len"],
-    node_corrupted_activation: Float[t.Tensor, "examples head seq_len seq_len"],
-    grad_wrt_node: Float[t.Tensor, "examples head seq_len seq_len"],
+    clean_attn_layer_cache: AttentionLayerCache,
+    corrupted_attn_layer_cache: AttentionLayerCache,
 ) -> Float[t.Tensor, "head seq_len seq_len"]:
     """Calculates the intervention effect of a node in the transformer (here attention)."""
+    if clean_attn_layer_cache.grad_attn_probabilities is None:
+        raise ValueError("No gradients found in the clean attention layer cache.")
+
+    # Get the activations and gradients for the node
+    node_clean_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
+        clean_attn_layer_cache.attn_probabilities
+    )
+    node_corrupted_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
+        corrupted_attn_layer_cache.attn_probabilities
+    )
+    grad_wrt_node: Float[t.Tensor, "examples head seq_len seq_len"] = (
+        clean_attn_layer_cache.grad_attn_probabilities
+    )
 
     # Calculate the intervention effect I_{AtP}(n; x_clean, x_corrupted)
     activation_diff = node_corrupted_activation - node_clean_activation
@@ -79,16 +91,15 @@ def run_atp(
     """
 
     (
-        clean_cache,
-        corrupted_cache,
-        clean_grad_cache,
+        clean_attn_cache,
+        corrupted_attn_cache,
     ) = get_atp_caches(
         model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
     )
 
     atp_component_contributions: list[t.Tensor] = [
-        atp_component_contribution(clean_cache[i], corrupted_cache[i], clean_grad_cache[i])
-        for i in range(len(clean_cache))
+        atp_component_contribution(clean_attn_cache[i], corrupted_attn_cache[i])
+        for i in range(len(clean_attn_cache))
     ]  # layer list[head]
     return atp_component_contributions
 
@@ -99,7 +110,7 @@ def get_atp_caches(
     corrupted_tokens: Int[t.Tensor, "examples"],
     off_distribution_tokens: Int[t.Tensor, "examples"],
     answer_token_indices: Int[t.Tensor, "examples 2"],
-) -> tuple[list[t.Tensor], list[t.Tensor], list[t.Tensor]]:
+) -> tuple[list[AttentionLayerCache], list[AttentionLayerCache]]:
     """Run the model forward passes on the clean and corrupted tokens and cache the activations.
     We also run a backward pass to cache the gradients on the clean tokens.
 
@@ -220,10 +231,23 @@ def get_atp_caches(
     corrupted_queries_cache = [value.value for value in corrupted_queries]
     corrupted_keys_cache = [value.value for value in corrupted_keys]
 
+    clean_attn_cache = [
+        AttentionLayerCache(
+            clean_cache[i], clean_queries_cache[i], clean_keys_cache[i], clean_grad_cache[i]
+        )
+        for i in range(len(clean_cache))
+    ]
+
+    corrupted_attn_cache = [
+        AttentionLayerCache(
+            corrupted_cache[i], corrupted_queries_cache[i], corrupted_keys_cache[i], None
+        )
+        for i in range(len(corrupted_cache))
+    ]
+
     return (
-        clean_cache,
-        corrupted_cache,
-        clean_grad_cache,
+        clean_attn_cache,
+        corrupted_attn_cache,
     )
 
 
