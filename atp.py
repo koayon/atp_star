@@ -119,7 +119,7 @@ def get_atp_caches(
             )  # type: ignore # M(x_clean)
             clean_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
                 clean_logits, answer_token_indices
-            ).save()
+            ).save()  # type: ignore
 
             # Cache the clean activations and gradients for all the nodes
             clean_cache = [
@@ -139,7 +139,7 @@ def get_atp_caches(
             corrupted_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output  # type: ignore
             corrupted_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
                 corrupted_logits, answer_token_indices
-            ).save()
+            ).save()  # type: ignore
 
             # Cache the corrupted activations and gradients for all the nodes
             corrupted_cache = [
@@ -153,7 +153,7 @@ def get_atp_caches(
             off_distribution_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output  # type: ignore
             off_distribution_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
                 off_distribution_logits, answer_token_indices
-            ).save()
+            ).save()  # type: ignore
 
             ioi_score = ioi_metric(
                 clean_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
@@ -189,14 +189,9 @@ def main():
         model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
     )
 
-    logger.debug(atp_component_contributions[-1].shape)
-    logger.debug(len(atp_component_contributions))
-
-    logger.debug(atp_component_contributions[-1][-2])
     attn_contributions_tensor = t.stack(
         atp_component_contributions, dim=0
     )  # layer head seq_len seq_len
-    logger.debug(t.max(attn_contributions_tensor, dim=(0)))
 
     logger.info(attn_contributions_tensor.shape)
 
