@@ -113,7 +113,7 @@ def get_atp_caches(
 
     """
     with model.trace() as tracer:
-        with tracer.invoke((clean_tokens,)) as invoker:
+        with tracer.invoke((clean_tokens,)) as clean_invoker:
 
             # Calculate L(M(x_clean))
             clean_logits: Float[t.Tensor, "examples seq_len vocab"] = (
@@ -139,7 +139,7 @@ def get_atp_caches(
                 for i in range(len(model.transformer.h))  # type: ignore
             ]
 
-        with tracer.invoke((corrupted_tokens,)) as invoker:
+        with tracer.invoke((corrupted_tokens,)) as corrupted_invoker:
 
             # Calculate L(M(x_corrupted))
             corrupted_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output  # type: ignore
@@ -155,7 +155,7 @@ def get_atp_caches(
                 for i in range(len(model.transformer.h))  # type: ignore
             ]
 
-        with tracer.invoke((off_distribution_tokens,)) as invoker:
+        with tracer.invoke((off_distribution_tokens,)) as off_distribution_invoker:
 
             # Calculate L(M(x_corrupted))
             off_distribution_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output  # type: ignore
@@ -190,7 +190,7 @@ def get_atp_caches(
 
 def main():
     logger.remove()
-    logger.add(sys.stdout, level="INFO")
+    logger.add(sys.stdout, level="DEBUG")
 
     prompt_store = build_prompt_store(tokeniser)
     clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices = (
@@ -201,10 +201,12 @@ def main():
         model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
     )
 
-    logger.debug(atp_component_contributions[0].shape)
+    logger.debug(atp_component_contributions[-1].shape)
     logger.debug(len(atp_component_contributions))
 
     logger.debug(atp_component_contributions[-1][-2])
+    contributions_tensor = t.stack(atp_component_contributions, dim=0)
+    logger.debug(t.max(contributions_tensor, dim=(0)))
 
     # plot_attention_attributions(
     #     attention_attr,
