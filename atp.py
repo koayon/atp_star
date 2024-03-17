@@ -123,7 +123,7 @@ def get_atp_caches(
                 clean_logits, answer_token_indices
             ).save()
 
-            print(type(clean_logit_diff))
+            # print(type(clean_logit_diff))
 
             # print(clean_logit_diff)
 
@@ -190,23 +190,31 @@ def get_atp_caches(
 
 def main():
     logger.remove()
-    logger.add(sys.stdout, level="DEBUG")
+    logger.add(sys.stdout, level="INFO")
 
     prompt_store = build_prompt_store(tokeniser)
     clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices = (
         prompt_store.prepare_tokens_and_indices()
     )
 
-    atp_component_contributions = run_atp(
+    clean_cache, corrupted_cache, clean_grad_cache = get_atp_caches(
         model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
     )
 
-    logger.debug(atp_component_contributions[-1].shape)
-    logger.debug(len(atp_component_contributions))
+    logger.info(clean_cache[0].shape)
+    logger.info(corrupted_cache[0].shape)
+    logger.info(clean_grad_cache[0].shape)
 
-    logger.debug(atp_component_contributions[-1][-2])
-    contributions_tensor = t.stack(atp_component_contributions, dim=0)
-    logger.debug(t.max(contributions_tensor, dim=(0)))
+    # atp_component_contributions = run_atp(
+    #     model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
+    # )
+
+    # logger.debug(atp_component_contributions[-1].shape)
+    # logger.debug(len(atp_component_contributions))
+
+    # logger.debug(atp_component_contributions[-1][-2])
+    # contributions_tensor = t.stack(atp_component_contributions, dim=0)
+    # logger.debug(t.max(contributions_tensor, dim=(0)))
 
     # plot_attention_attributions(
     #     attention_attr,
