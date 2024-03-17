@@ -58,6 +58,21 @@ def mean_logit_diff(
 
 
 def get_num_layers_heads(model: LanguageModel) -> tuple[int, int, list[str]]:
+    """Given model, return the number of layers, number of heads and head names.
+
+    Parameters
+    ----------
+    model : LanguageModel
+
+    Returns
+    -------
+    num_layers: int
+        The number of layers in the model.
+    num_heads: int
+        The number of heads in the model.
+    head_names_signed: list[str]
+        The names of the heads in the model.
+    """
     num_layers = len(model.transformer.h)  # type: ignore
     num_heads = int(model.transformer.h[0].attn.num_heads)  # type: ignore
 
