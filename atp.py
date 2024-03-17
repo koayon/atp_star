@@ -1,19 +1,26 @@
 import sys
+from dataclasses import dataclass
+from typing import Optional
 
 import torch as t
+from bleach import clean
 from einops import einsum
 from jaxtyping import Float, Int
 from loguru import logger
 from nnsight import LanguageModel
+from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
 
 from helpers import get_num_layers_heads, ioi_metric, mean_logit_diff
 from plot import plot_attention_attributions, plot_single_attention_pattern
 from prompt_store import build_prompt_store
 
-model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
-# model = LanguageModel("delphi-suite/v0-llama2-100k", device_map="mps", dispatch=True)
-# model = LanguageModel("roneneldan/TinyStories-1M", device_map="cpu", dispatch=True)
-tokeniser = model.tokenizer
+
+@dataclass
+class AttentionLayerCache:
+    attn_probabilities: t.Tensor
+    queries: t.Tensor
+    keys: t.Tensor
+    grad_probabilities: Optional[t.Tensor]
 
 
 def atp_component_contribution(
@@ -110,6 +117,10 @@ def get_atp_caches(
     clean_grad_cache : list[t.Tensor]
 
     """
+    num_layers, num_heads, _ = get_num_layers_heads(model)
+    attn: GPT2Attention = model.transformer.h[0].attn  # type: ignore
+    head_dim = int(attn.head_dim)
+
     with model.trace() as tracer:
         with tracer.invoke(clean_tokens) as clean_invoker:
 
@@ -124,13 +135,31 @@ def get_atp_caches(
             # Cache the clean activations and gradients for all the nodes
             clean_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
-                for i in range(len(model.transformer.h))  # type: ignore
+                for i in range(num_layers)  # type: ignore
                 # batch head_index seq_len seq_len
             ]
 
             clean_grad_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
-                for i in range(len(model.transformer.h))  # type: ignore
+                for i in range(num_layers)  # type: ignore
+            ]
+
+            # Get keys and values
+            flat_queries = [
+                model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[0]
+                for i in range(num_layers)
+            ]  # type: ignore
+            flat_keys = [
+                model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1]
+                for i in range(num_layers)
+            ]  # type: ignore
+
+            clean_queries = [
+                attn._split_heads(flat_query, num_heads, head_dim).save()
+                for flat_query in flat_queries
+            ]
+            clean_keys = [
+                attn._split_heads(flat_key, num_heads, head_dim).save() for flat_key in flat_keys
             ]
 
         with tracer.invoke(corrupted_tokens) as corrupted_invoker:
@@ -145,6 +174,23 @@ def get_atp_caches(
             corrupted_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
                 for i in range(len(model.transformer.h))  # type: ignore
+            ]
+
+            flat_queries = [
+                model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[0]
+                for i in range(num_layers)
+            ]  # type: ignore
+            flat_keys = [
+                model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1]
+                for i in range(num_layers)
+            ]  # type: ignore
+
+            corrupted_queries = [
+                attn._split_heads(flat_query, num_heads, head_dim).save()
+                for flat_query in flat_queries
+            ]
+            corrupted_keys = [
+                attn._split_heads(flat_key, num_heads, head_dim).save() for flat_key in flat_keys
             ]
 
         with tracer.invoke(off_distribution_tokens) as off_distribution_invoker:
@@ -168,6 +214,11 @@ def get_atp_caches(
     clean_cache = [value.value for value in clean_cache]
     clean_grad_cache = [value.value for value in clean_grad_cache]
     corrupted_cache = [value.value for value in corrupted_cache]
+
+    clean_queries_cache = [value.value for value in clean_queries]
+    clean_keys_cache = [value.value for value in clean_keys]
+    corrupted_queries_cache = [value.value for value in corrupted_queries]
+    corrupted_keys_cache = [value.value for value in corrupted_keys]
 
     return (
         clean_cache,
@@ -211,5 +262,13 @@ def main():
 
 
 if __name__ == "__main__":
+
+    model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
+    # model = LanguageModel("delphi-suite/v0-llama2-100k", device_map="mps", dispatch=True)
+    # model = LanguageModel("roneneldan/TinyStories-1M", device_map="cpu", dispatch=True)
+    tokeniser = model.tokenizer
+
     # print(model)
     main()
+
+    # print(model.transformer.h[0].attn.c_attn.weight.shape)
