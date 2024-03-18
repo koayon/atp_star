@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch as t
-from einops import einsum
+from einops import einsum, rearrange
 from jaxtyping import Float, Int
 from loguru import logger
 from nnsight import LanguageModel
@@ -21,10 +21,12 @@ class AttentionLayerCache:
     key_corrupted_attn_probs: t.Tensor
     fully_corrupted_attn_probs: t.Tensor
     clean_grad_attn_probabilities: t.Tensor
+    grad_drop_attn_probs: Optional[t.Tensor] = None
 
 
 def atp_component_contribution(
     attn_layer_cache: AttentionLayerCache,
+    use_grad_drop: bool = False,
 ) -> Float[t.Tensor, "head seq_len"]:
     """Calculates the intervention effect of a node in the transformer (here attention)."""
     # Get the activations and gradients for the node
@@ -43,16 +45,20 @@ def atp_component_contribution(
 
     logger.debug(activation_diff.max())
 
-    # Equation 4
-    intervention_effect = einsum(
-        activation_diff,
-        grad_wrt_node,
-        "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1",
-    )
+    if use_grad_drop and attn_layer_cache.grad_drop_attn_probs is not None:
+        pass
 
-    # Equation 5
-    # Calculate the contribution c_{AtP}(n) = ExpectedValue(|I_{AtP}(n; x_clean, x_corrupted)|)
-    contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len
+    else:
+        # Equation 4
+        intervention_effect = einsum(
+            activation_diff,
+            grad_wrt_node,
+            "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1",
+        )
+
+        # Equation 5
+        # Calculate the contribution c_{AtP}(n) = ExpectedValue(|I_{AtP}(n; x_clean, x_corrupted)|)
+        contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len
     return contribution
 
 
@@ -287,9 +293,9 @@ def get_atp_caches(
         # TODO: This is currently the O(n^3) implementation, following Algorithm 4 we can reduce this to O(n^2)
 
         for i in range(num_layers):
-            # TODO: Note here we're currently computing the whole forward pass
+            # TODO: Note here (and in the q version) we're currently computing the whole forward pass
             # but we actually only need to compute the forward until the attention probabilities
-            # for the speed benefits
+            # for the increased speed
             with tracer.invoke(clean_tokens) as k_patch_invoker:
                 # Patch the keys with the corrupted keys
                 model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1] = (
@@ -302,6 +308,35 @@ def get_atp_caches(
 
                 # TODO: Patch back in the clean attention probs
 
+        # GradDrop
+        grad_drop_collection: list = []
+        for l in range(num_layers):
+            with tracer.invoke(clean_tokens) as grad_drop_invoker:
+                # Zero out the gradients on each layer from the residual connection
+                model.transformer.h[l].attn.resid_dropout.input[0][0].grad.zero_()
+
+                # Collect the gradients on the attention probabilities
+                grad_cache_layer_dropped = [
+                    model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
+                    for i in range(num_layers)  # type: ignore
+                ]  # layer list[examples head seq_len seq_len]
+                grad_drop_collection.append(
+                    t.stack(grad_cache_layer_dropped, dim=0)  # type: ignore
+                )  # dropped_layer list[layer examples head seq_len seq_len]]
+
+        tensor_grad_drop_cache = t.stack(
+            grad_drop_collection, dim=0
+        )  # dropped_layer layer examples head seq_len seq_len
+
+        tensor_grad_drop_cache = rearrange(
+            tensor_grad_drop_cache,
+            "dropped_layer layer examples head seq_len seq_len -> layer dropped_layer examples head seq_len seq_len",
+        )
+
+        grad_drop_cache = [
+            tensor_grad_drop_cache[i] for i in range(len(tensor_grad_drop_cache))
+        ]  # layer list[dropped_layer examples head seq_len seq_len]
+
     logger.debug(clean_logit_diff)
     logger.debug(corrupted_logit_diff)
     logger.debug(off_distribution_logit_diff)
@@ -313,6 +348,8 @@ def get_atp_caches(
     q_corrupted_cache = [value.value for value in q_corrupted_cache]
     k_corrupted_cache = [value.value for value in k_corrupted_cache]
 
+    grad_drop_cache = [value for value in grad_drop_cache]
+
     attn_cache = [
         AttentionLayerCache(
             clean_attn_probs=clean_cache[i],
@@ -320,6 +357,7 @@ def get_atp_caches(
             key_corrupted_attn_probs=k_corrupted_cache[i],
             fully_corrupted_attn_probs=corrupted_cache[i],
             clean_grad_attn_probabilities=clean_grad_cache[i],
+            grad_drop_attn_probs=grad_drop_cache[i] if grad_drop_cache else None,
         )
         for i in range(len(clean_cache))
     ]
