@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch as t
-from bleach import clean
 from einops import einsum
 from jaxtyping import Float, Int
 from loguru import logger
@@ -17,29 +16,26 @@ from prompt_store import build_prompt_store
 
 @dataclass
 class AttentionLayerCache:
-    attn_probabilities: t.Tensor
-    queries: t.Tensor
-    keys: t.Tensor
-    grad_attn_probabilities: Optional[t.Tensor]
+    clean_attn_probs: t.Tensor
+    query_corrupted_attn_probs: t.Tensor
+    key_corrupted_attn_probs: t.Tensor
+    fully_corrupted_attn_probs: t.Tensor
+    clean_grad_attn_probabilities: t.Tensor
 
 
 def atp_component_contribution(
-    clean_attn_layer_cache: AttentionLayerCache,
-    corrupted_attn_layer_cache: AttentionLayerCache,
+    attn_layer_cache: AttentionLayerCache,
 ) -> Float[t.Tensor, "head seq_len seq_len"]:
     """Calculates the intervention effect of a node in the transformer (here attention)."""
-    if clean_attn_layer_cache.grad_attn_probabilities is None:
-        raise ValueError("No gradients found in the clean attention layer cache.")
-
     # Get the activations and gradients for the node
     node_clean_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
-        clean_attn_layer_cache.attn_probabilities
+        attn_layer_cache.clean_attn_probs
     )
     node_corrupted_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
-        corrupted_attn_layer_cache.attn_probabilities
+        attn_layer_cache.fully_corrupted_attn_probs
     )
     grad_wrt_node: Float[t.Tensor, "examples head seq_len seq_len"] = (
-        clean_attn_layer_cache.grad_attn_probabilities
+        attn_layer_cache.clean_grad_attn_probabilities
     )
 
     # Calculate the intervention effect I_{AtP}(n; x_clean, x_corrupted)
@@ -56,6 +52,23 @@ def atp_component_contribution(
     # Calculate the contribution c_{AtP}(n) = ExpectedValue(|I_{AtP}(n; x_clean, x_corrupted)|)
     contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len seq_len
     return contribution
+
+
+def atp_q_contribution(
+    clean_attn_layer_cache: AttentionLayerCache,
+    corrupted_attn_layer_cache: AttentionLayerCache,
+) -> Float[t.Tensor, "head seq_len seq_len"]:
+    raise NotImplementedError
+    # Get the activations and gradients for the node
+    node_clean_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
+        clean_attn_layer_cache.attn_probabilities
+    )
+    # node_corrupted_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
+    #     corrupted_attn_layer_cache.attn_probabilities
+    # )
+    grad_wrt_node: Float[t.Tensor, "examples head seq_len seq_len"] = (
+        clean_attn_layer_cache.grad_attn_probabilities
+    )
 
 
 def run_atp(
@@ -90,16 +103,12 @@ def run_atp(
         The approximate contribution of each component to the metric, as given by the AtP algorithm.
     """
 
-    (
-        clean_attn_cache,
-        corrupted_attn_cache,
-    ) = get_atp_caches(
+    attn_cache = get_atp_caches(
         model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
     )
 
     atp_component_contributions: list[t.Tensor] = [
-        atp_component_contribution(clean_attn_cache[i], corrupted_attn_cache[i])
-        for i in range(len(clean_attn_cache))
+        atp_component_contribution(attn_cache[i]) for i in range(len(attn_cache))
     ]  # layer list[head]
     return atp_component_contributions
 
@@ -110,7 +119,7 @@ def get_atp_caches(
     corrupted_tokens: Int[t.Tensor, "examples"],
     off_distribution_tokens: Int[t.Tensor, "examples"],
     answer_token_indices: Int[t.Tensor, "examples 2"],
-) -> tuple[list[AttentionLayerCache], list[AttentionLayerCache]]:
+) -> list[AttentionLayerCache]:
     """Run the model forward passes on the clean and corrupted tokens and cache the activations.
     We also run a backward pass to cache the gradients on the clean tokens.
 
@@ -155,22 +164,23 @@ def get_atp_caches(
                 for i in range(num_layers)  # type: ignore
             ]
 
-            # Get keys and values
-            flat_queries = [
+            # Get keys and queries
+            flat_clean_queries = [
                 model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[0]
                 for i in range(num_layers)
             ]  # type: ignore
-            flat_keys = [
+            flat_clean_keys = [
                 model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1]
                 for i in range(num_layers)
             ]  # type: ignore
 
             clean_queries = [
                 attn._split_heads(flat_query, num_heads, head_dim).save()
-                for flat_query in flat_queries
+                for flat_query in flat_clean_queries
             ]
             clean_keys = [
-                attn._split_heads(flat_key, num_heads, head_dim).save() for flat_key in flat_keys
+                attn._split_heads(flat_key, num_heads, head_dim).save()
+                for flat_key in flat_clean_keys
             ]
 
         with tracer.invoke(corrupted_tokens) as corrupted_invoker:
@@ -187,21 +197,22 @@ def get_atp_caches(
                 for i in range(len(model.transformer.h))  # type: ignore
             ]
 
-            flat_queries = [
+            flat_corrupted_queries = [
                 model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[0]
                 for i in range(num_layers)
             ]  # type: ignore
-            flat_keys = [
+            flat_corrupted_keys = [
                 model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1]
                 for i in range(num_layers)
             ]  # type: ignore
 
             corrupted_queries = [
                 attn._split_heads(flat_query, num_heads, head_dim).save()
-                for flat_query in flat_queries
+                for flat_query in flat_corrupted_queries
             ]
             corrupted_keys = [
-                attn._split_heads(flat_key, num_heads, head_dim).save() for flat_key in flat_keys
+                attn._split_heads(flat_key, num_heads, head_dim).save()
+                for flat_key in flat_corrupted_keys
             ]
 
         with tracer.invoke(off_distribution_tokens) as off_distribution_invoker:
@@ -218,6 +229,30 @@ def get_atp_caches(
 
             ioi_score.backward()
 
+        q_corrupted_cache: list = []
+        for i in range(num_layers):
+            with tracer.invoke(clean_queries) as q_patch_invoker:
+                # Patch the queries with the corrupted queries
+                model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[0] = (
+                    flat_corrupted_queries[i]
+                )
+                # Compute and cache the attention probabilities with the patched queries
+                q_corrupted_cache.append(
+                    model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
+                )
+
+        k_corrupted_cache: list = []
+        for i in range(num_layers):
+            with tracer.invoke(clean_keys) as k_patch_invoker:
+                # Patch the keys with the corrupted keys
+                model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1] = (
+                    flat_corrupted_keys[i]
+                )
+                # Compute and cache the attention probabilities with the patched keys
+                k_corrupted_cache.append(
+                    model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
+                )
+
     logger.debug(clean_logit_diff)
     logger.debug(corrupted_logit_diff)
     logger.debug(off_distribution_logit_diff)
@@ -226,29 +261,40 @@ def get_atp_caches(
     clean_grad_cache = [value.value for value in clean_grad_cache]
     corrupted_cache = [value.value for value in corrupted_cache]
 
-    clean_queries_cache = [value.value for value in clean_queries]
-    clean_keys_cache = [value.value for value in clean_keys]
-    corrupted_queries_cache = [value.value for value in corrupted_queries]
-    corrupted_keys_cache = [value.value for value in corrupted_keys]
+    q_corrupted_cache = [value.value for value in q_corrupted_cache]
+    k_corrupted_cache = [value.value for value in k_corrupted_cache]
 
-    clean_attn_cache = [
+    # clean_queries_cache = [value.value for value in clean_queries]
+    # clean_keys_cache = [value.value for value in clean_keys]
+    # corrupted_queries_cache = [value.value for value in corrupted_queries]
+    # corrupted_keys_cache = [value.value for value in corrupted_keys]
+
+    # clean_attn_cache = [
+    #     AttentionLayerCache(
+    #         clean_cache[i], clean_queries_cache[i], clean_keys_cache[i], clean_grad_cache[i]
+    #     )
+    #     for i in range(len(clean_cache))
+    # ]
+
+    # corrupted_attn_cache = [
+    #     AttentionLayerCache(
+    #         corrupted_cache[i], corrupted_queries_cache[i], corrupted_keys_cache[i], None
+    #     )
+    #     for i in range(len(corrupted_cache))
+    # ]
+
+    attn_cache = [
         AttentionLayerCache(
-            clean_cache[i], clean_queries_cache[i], clean_keys_cache[i], clean_grad_cache[i]
+            clean_attn_probs=clean_cache[i],
+            query_corrupted_attn_probs=q_corrupted_cache[i],
+            key_corrupted_attn_probs=k_corrupted_cache[i],
+            fully_corrupted_attn_probs=corrupted_cache[i],
+            clean_grad_attn_probabilities=clean_grad_cache[i],
         )
         for i in range(len(clean_cache))
     ]
 
-    corrupted_attn_cache = [
-        AttentionLayerCache(
-            corrupted_cache[i], corrupted_queries_cache[i], corrupted_keys_cache[i], None
-        )
-        for i in range(len(corrupted_cache))
-    ]
-
-    return (
-        clean_attn_cache,
-        corrupted_attn_cache,
-    )
+    return attn_cache
 
 
 def main():
