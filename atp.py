@@ -284,7 +284,12 @@ def get_atp_caches(
                 )
 
         k_corrupted_cache: list = []
+        # TODO: This is currently the O(n^3) implementation, following Algorithm 4 we can reduce this to O(n^2)
+
         for i in range(num_layers):
+            # TODO: Note here we're currently computing the whole forward pass
+            # but we actually only need to compute the forward until the attention probabilities
+            # for the speed benefits
             with tracer.invoke(clean_tokens) as k_patch_invoker:
                 # Patch the keys with the corrupted keys
                 model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1] = (
@@ -294,6 +299,8 @@ def get_atp_caches(
                 k_corrupted_cache.append(
                     model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
                 )
+
+                # TODO: Patch back in the clean attention probs
 
     logger.debug(clean_logit_diff)
     logger.debug(corrupted_logit_diff)
