@@ -46,7 +46,26 @@ def atp_component_contribution(
     logger.debug(activation_diff.max())
 
     if use_grad_drop and attn_layer_cache.grad_drop_attn_probs is not None:
-        pass
+        grad_drop_wrt_node: Float[t.Tensor, "dropped_layer examples head seq_len seq_len"] = (
+            attn_layer_cache.grad_drop_attn_probs
+        )
+
+        # Equation 11
+        # Calculate the contribution
+        # c_{AtP+GD}(n) = ExpectedValue(1/(L-1) * |I_{AtP+GD}_l(n; x_clean, x_corrupted)|)
+        intervention_effects = einsum(
+            activation_diff,
+            grad_drop_wrt_node,
+            "batch head seq_len1 seq_len2, dropped_layer batch head seq_len1 seq_len2 -> dropped_layer batch head seq_len1",
+        )
+
+        individual_contributions = t.sum(intervention_effects.abs(), dim=0) / (
+            len(grad_drop_wrt_node) - 1
+        )  # batch head seq_len
+        contribution = t.mean(individual_contributions, dim=0)  # head seq_len
+
+    elif use_grad_drop:
+        raise ValueError("grad_drop_attn_probs not provided")
 
     else:
         # Equation 4
