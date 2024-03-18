@@ -25,7 +25,7 @@ class AttentionLayerCache:
 
 def atp_component_contribution(
     attn_layer_cache: AttentionLayerCache,
-) -> Float[t.Tensor, "head seq_len seq_len"]:
+) -> Float[t.Tensor, "head seq_len"]:
     """Calculates the intervention effect of a node in the transformer (here attention)."""
     # Get the activations and gradients for the node
     node_clean_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
@@ -46,17 +46,17 @@ def atp_component_contribution(
     intervention_effect = einsum(
         activation_diff,
         grad_wrt_node,
-        "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1 seq_len2",
+        "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1",
     )
 
     # Calculate the contribution c_{AtP}(n) = ExpectedValue(|I_{AtP}(n; x_clean, x_corrupted)|)
-    contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len seq_len
+    contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len
     return contribution
 
 
 def atp_q_contribution(
     attn_layer_cache: AttentionLayerCache,
-) -> Float[t.Tensor, "head seq_len seq_len"]:
+) -> Float[t.Tensor, "head seq_len"]:
     # Get the activations and gradients for the node
     node_clean_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
         attn_layer_cache.clean_attn_probs
@@ -76,11 +76,57 @@ def atp_q_contribution(
     intervention_effect = einsum(
         activation_diff,
         grad_wrt_node,
-        "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1 seq_len2",
+        "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1",
     )
 
     # Calculate the contribution c_{AtP}(n) = ExpectedValue(|I_{AtP}(n; x_clean, x_corrupted)|)
     contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len seq_len
+    return contribution
+
+
+def atp_k_contribution(
+    attn_layer_cache: AttentionLayerCache,
+) -> Float[t.Tensor, "head seq_len"]:
+    # Get the activations and gradients for the node
+    node_clean_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
+        attn_layer_cache.clean_attn_probs
+    )
+    node_k_corrupted_activation: Float[t.Tensor, "examples head seq_len seq_len"] = (
+        attn_layer_cache.query_corrupted_attn_probs
+    )
+    grad_wrt_node: Float[t.Tensor, "examples head seq_len seq_len"] = (
+        attn_layer_cache.clean_grad_attn_probabilities
+    )
+
+    # Calculate the intervention effect I_{AtP}(n; x_clean, x_corrupted)
+    activation_diff = node_k_corrupted_activation - node_clean_activation
+
+    logger.debug(activation_diff.max())
+
+    # intervention_effect = einsum(
+    #     activation_diff,
+    #     grad_wrt_node,
+    #     "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1 seq_len2",
+    # )
+    position_intervention_effect = einsum(
+        activation_diff,
+        grad_wrt_node,
+        "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1",
+    )
+
+    # Sum in Equation 10 is over n^q in queries(n_t^k).
+    # The final query can see all the keys, the first query can only see the first key etc.
+    _, _, seq_len = position_intervention_effect.shape
+
+    lower_tri_mask = t.tril(t.ones(seq_len, seq_len))
+    intervention_effect = einsum(
+        position_intervention_effect,
+        lower_tri_mask,
+        "batch head seq_len_q, seq_len_q seq_len_k -> batch head seq_len_k",
+    )
+
+    # Calculate the contribution c_{AtP}(n) = ExpectedValue(|I_{AtP}(n; x_clean, x_corrupted)|)
+    contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len
     return contribution
 
 
