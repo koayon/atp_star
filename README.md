@@ -24,5 +24,6 @@ TODO
 - [ ] Look at MLP component contributions
 - [ ] Conduct ablations and throughput experiments to reproduce paper results
 - [ ] Testing
+- [ ] Decouple from GPT-2
 - [ ] Add complete circuit-finding algorithm with subsampling and sending the highest ranked nodes to the slower AcP algorithm
 - [ ] Add subsampling for diagnostic bounds

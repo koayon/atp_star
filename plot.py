@@ -2,7 +2,9 @@ import tempfile
 import webbrowser
 
 import circuitsvis as cv
+import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import seaborn as sns
 import torch as t
 from circuitsvis.utils.render import RenderedHTML
@@ -56,12 +58,75 @@ def plot_attention_attributions(
     show_html_in_browser(html_plot)
 
 
-def plot_single_attention_pattern(attention_pattern: t.Tensor) -> None:
+def plot_tensor_2d(input: t.Tensor) -> None:
     # Convert the PyTorch tensor to a numpy array
-    attention_pattern_np = attention_pattern.detach().numpy()
+    input_np = input.detach().numpy()
 
     # Use seaborn to create a heatmap
-    sns.heatmap(attention_pattern_np)
+    sns.heatmap(input_np)
 
     # Display the plot
     plt.show()
+
+
+def plot_tensor_3d(
+    input: Float[t.Tensor, "layer head seq"], title: str, sequence_positions: list[str]
+) -> None:
+    input_np = input.detach().numpy()
+
+    fig = go.Figure()
+
+    # Add each 2D tensor slice as a separate image trace
+    for i in range(input_np.shape[0]):
+        fig.add_trace(
+            go.Heatmap(z=input_np[i], visible=(i == 0))  # Only the first slice is visible initially
+        )
+
+    # Create buttons to toggle visibility
+    buttons = []
+    for i in range(input_np.shape[0]):
+        visibility = [False] * input_np.shape[0]
+        visibility[i] = True  # Only the current slice is visible
+        button = dict(label=f"Layer {i+1}", method="update", args=[{"visible": visibility}])
+        buttons.append(button)
+
+    # Update layout with buttons
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                type="buttons",
+                direction="right",
+                buttons=buttons,
+                pad={"r": 10, "t": 10},
+                showactive=True,
+                x=0.1,
+                xanchor="left",
+                y=1.1,
+                yanchor="top",
+            )
+        ]
+    )
+
+    # Set axis titles
+    # fig.update_xaxes(title_text="Sequence Position")
+    # fig.update_yaxes(title_text="Head")
+
+    fig.update_layout(
+        title=title,
+        xaxis=dict(
+            title="Sequence Position",
+            tickvals=list(range(len(sequence_positions))),
+            ticktext=sequence_positions,
+        ),
+        yaxis=dict(title="Head"),
+    )
+
+    fig.show(renderer="browser")
+
+
+if __name__ == "__main__":
+    # Create a 3D tensor with random values
+    input = t.rand(3, 4, 5)
+
+    # Plot the tensor
+    plot_tensor_3d(input, "Testing 3d plotting", ["a", "b", "c", "d", "e"])
