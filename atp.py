@@ -43,12 +43,14 @@ def atp_component_contribution(
 
     logger.debug(activation_diff.max())
 
+    # Equation 4
     intervention_effect = einsum(
         activation_diff,
         grad_wrt_node,
         "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1",
     )
 
+    # Equation 5
     # Calculate the contribution c_{AtP}(n) = ExpectedValue(|I_{AtP}(n; x_clean, x_corrupted)|)
     contribution = t.mean(intervention_effect.abs(), dim=0)  # head seq_len
     return contribution
@@ -73,6 +75,7 @@ def atp_q_contribution(
 
     logger.debug(activation_diff.max())
 
+    # Equation 7
     intervention_effect = einsum(
         activation_diff,
         grad_wrt_node,
@@ -98,16 +101,12 @@ def atp_k_contribution(
         attn_layer_cache.clean_grad_attn_probabilities
     )
 
+    # Equation 9
     # Calculate the intervention effect I_{AtP}(n; x_clean, x_corrupted)
     activation_diff = node_k_corrupted_activation - node_clean_activation
 
     logger.debug(activation_diff.max())
 
-    # intervention_effect = einsum(
-    #     activation_diff,
-    #     grad_wrt_node,
-    #     "batch head seq_len1 seq_len2, batch head seq_len1 seq_len2 -> batch head seq_len1 seq_len2",
-    # )
     position_intervention_effect = einsum(
         activation_diff,
         grad_wrt_node,
@@ -119,6 +118,8 @@ def atp_k_contribution(
     _, _, seq_len = position_intervention_effect.shape
 
     lower_tri_mask = t.tril(t.ones(seq_len, seq_len))
+
+    # Equation 10
     intervention_effect = einsum(
         position_intervention_effect,
         lower_tri_mask,
