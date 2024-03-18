@@ -10,7 +10,7 @@ from nnsight import LanguageModel
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
 
 from helpers import get_num_layers_heads, ioi_metric, mean_logit_diff
-from plot import plot_attention_attributions, plot_single_attention_pattern
+from plot import plot_attention_attributions, plot_tensor_2d, plot_tensor_3d
 from prompt_store import build_prompt_store
 
 
@@ -300,9 +300,11 @@ def get_atp_caches(
         for i in range(num_layers):
             with tracer.invoke(clean_tokens) as q_patch_invoker:
                 # Patch the queries with the corrupted queries
-                model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[0] = (
-                    flat_corrupted_queries[i]
-                )
+                qkv = model.transformer.h[i].attn.c_attn.output
+                _, k, v = qkv.split(attn.split_size, dim=2)
+                new_qkv = t.cat([flat_corrupted_queries[i], k, v], dim=2)  #  type: ignore
+                model.transformer.h[i].attn.c_attn.output = new_qkv
+
                 # Compute and cache the attention probabilities with the patched queries
                 q_corrupted_cache.append(
                     model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
@@ -317,9 +319,11 @@ def get_atp_caches(
             # for the increased speed
             with tracer.invoke(clean_tokens) as k_patch_invoker:
                 # Patch the keys with the corrupted keys
-                model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1] = (
-                    flat_corrupted_keys[i]
-                )
+                qkv = model.transformer.h[i].attn.c_attn.output
+                q, _, v = qkv.split(attn.split_size, dim=2)
+                new_qkv = t.cat([q, flat_corrupted_keys[i], v], dim=2)  #  type: ignore
+                model.transformer.h[i].attn.c_attn.output = new_qkv
+
                 # Compute and cache the attention probabilities with the patched keys
                 k_corrupted_cache.append(
                     model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
@@ -349,11 +353,11 @@ def get_atp_caches(
 
         tensor_grad_drop_cache = rearrange(
             tensor_grad_drop_cache,
-            "dropped_layer layer examples head seq_len seq_len -> layer dropped_layer examples head seq_len seq_len",
+            "dropped_layer layer examples head seq_len_dest seq_len_source -> layer dropped_layer examples head seq_len_dest seq_len_source",
         )
 
         grad_drop_cache = [
-            tensor_grad_drop_cache[i] for i in range(len(tensor_grad_drop_cache))
+            tensor_grad_drop_cache[i] for i in range(num_layers)
         ]  # layer list[dropped_layer examples head seq_len seq_len]
 
     logger.debug(clean_logit_diff)
@@ -397,25 +401,21 @@ def main():
         model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
     )
 
-    attn_contributions_tensor = t.stack(
-        atp_component_contributions, dim=0
-    )  # layer head seq_len seq_len
+    attn_contributions_tensor = t.stack(atp_component_contributions, dim=0)  # layer head seq_len
 
     logger.info(attn_contributions_tensor.shape)
 
-    clean_token_strs = [tokeniser.decode(token) for token in clean_tokens]
+    clean_token_strs = [tokeniser.decode(token) for token in clean_tokens[0]]
 
-    _num_layers, _num_heads, head_names_signed = get_num_layers_heads(model)
+    # plot_tensor_2d(attn_contributions_tensor[0, :, :])
 
-    # plot_attention_attributions(
-    #     attention_attr=attn_contributions_tensor,
-    #     token_strs=clean_token_strs,
-    #     head_names_signed=head_names_signed,
-    # )
+    plot_tensor_3d(
+        attn_contributions_tensor,
+        "AtP* Component Contributions",
+        sequence_positions=clean_token_strs,
+    )
 
-    plot_single_attention_pattern(attn_contributions_tensor[0, 0, :, :])
-
-    # print(html_plot)
+    # _num_layers, _num_heads, head_names_signed = get_num_layers_heads(model)
 
 
 if __name__ == "__main__":
