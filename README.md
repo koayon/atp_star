@@ -20,7 +20,7 @@ TODO
 
 - [x] Implement AtP algorithm
 - [x] Implement AtP with QK-Fix algorithm improvements
-- [ ] Implement full AtP* with GradDrop
+- [x] Implement full AtP* with GradDrop
 - [ ] Look at MLP component contributions
 - [ ] Conduct ablations and throughput experiments to reproduce paper results
 - [ ] Testing
