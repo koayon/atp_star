@@ -234,15 +234,6 @@ def get_atp_caches(
                 for i in range(num_layers)
             ]  # type: ignore
 
-            clean_queries = [
-                attn._split_heads(flat_query, num_heads, head_dim).save()
-                for flat_query in flat_clean_queries
-            ]
-            clean_keys = [
-                attn._split_heads(flat_key, num_heads, head_dim).save()
-                for flat_key in flat_clean_keys
-            ]
-
         with tracer.invoke(corrupted_tokens) as corrupted_invoker:
 
             # Calculate L(M(x_corrupted))
@@ -266,15 +257,6 @@ def get_atp_caches(
                 for i in range(num_layers)
             ]  # type: ignore
 
-            corrupted_queries = [
-                attn._split_heads(flat_query, num_heads, head_dim).save()
-                for flat_query in flat_corrupted_queries
-            ]
-            corrupted_keys = [
-                attn._split_heads(flat_key, num_heads, head_dim).save()
-                for flat_key in flat_corrupted_keys
-            ]
-
         with tracer.invoke(off_distribution_tokens) as off_distribution_invoker:
 
             # Calculate L(M(x_corrupted))
@@ -291,7 +273,7 @@ def get_atp_caches(
 
         q_corrupted_cache: list = []
         for i in range(num_layers):
-            with tracer.invoke(clean_queries) as q_patch_invoker:
+            with tracer.invoke(clean_tokens) as q_patch_invoker:
                 # Patch the queries with the corrupted queries
                 model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[0] = (
                     flat_corrupted_queries[i]
@@ -303,7 +285,7 @@ def get_atp_caches(
 
         k_corrupted_cache: list = []
         for i in range(num_layers):
-            with tracer.invoke(clean_keys) as k_patch_invoker:
+            with tracer.invoke(clean_tokens) as k_patch_invoker:
                 # Patch the keys with the corrupted keys
                 model.transformer.h[i].attn.c_attn.output.split(attn.split_size, dim=2)[1] = (
                     flat_corrupted_keys[i]
@@ -323,25 +305,6 @@ def get_atp_caches(
 
     q_corrupted_cache = [value.value for value in q_corrupted_cache]
     k_corrupted_cache = [value.value for value in k_corrupted_cache]
-
-    # clean_queries_cache = [value.value for value in clean_queries]
-    # clean_keys_cache = [value.value for value in clean_keys]
-    # corrupted_queries_cache = [value.value for value in corrupted_queries]
-    # corrupted_keys_cache = [value.value for value in corrupted_keys]
-
-    # clean_attn_cache = [
-    #     AttentionLayerCache(
-    #         clean_cache[i], clean_queries_cache[i], clean_keys_cache[i], clean_grad_cache[i]
-    #     )
-    #     for i in range(len(clean_cache))
-    # ]
-
-    # corrupted_attn_cache = [
-    #     AttentionLayerCache(
-    #         corrupted_cache[i], corrupted_queries_cache[i], corrupted_keys_cache[i], None
-    #     )
-    #     for i in range(len(corrupted_cache))
-    # ]
 
     attn_cache = [
         AttentionLayerCache(
@@ -398,7 +361,4 @@ if __name__ == "__main__":
     # model = LanguageModel("roneneldan/TinyStories-1M", device_map="cpu", dispatch=True)
     tokeniser = model.tokenizer
 
-    # print(model)
     main()
-
-    # print(model.transformer.h[0].attn.c_attn.weight.shape)
