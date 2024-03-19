@@ -21,7 +21,7 @@ TODO
 - [x] Implement AtP algorithm
 - [x] Implement AtP with QK-Fix algorithm improvements
 - [x] Implement full AtP* with GradDrop
-- [ ] Look at MLP component contributions
+- [x] Look at MLP component contributions
 - [ ] Optimise for GPU and apply fast K_fix method (Algorithm 4)
 - [ ] Conduct ablations and throughput experiments to reproduce paper results
 - [ ] Testing
