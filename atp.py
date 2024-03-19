@@ -7,7 +7,7 @@ from loguru import logger
 from transformers import AutoTokenizer
 
 from interventions import AttentionLayerCache, get_atp_caches
-from plot import plot_attention_attributions, plot_tensor_2d, plot_tensor_3d
+from plot import plot_tensor_2d, plot_tensor_3d
 from prompt_store import build_prompt_store
 
 

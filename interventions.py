@@ -86,7 +86,7 @@ def get_atp_caches(
             # Cache the corrupted activations and gradients for all the nodes
             corrupted_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
-                for i in range(len(model.transformer.h))  # type: ignore
+                for i in range(num_layers)  # type: ignore
             ]
 
             flat_corrupted_queries = [
@@ -165,7 +165,7 @@ def get_atp_caches(
                 # Collect the gradients on the attention probabilities
                 layer_dropped_grad_cache = [
                     model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
-                    for i in range(len(model.transformer.h))  # type: ignore
+                    for i in range(num_layers)  # type: ignore
                 ]  # layer list[examples head seq_len seq_len]
 
                 layer_dropped_ioi_score = ioi_metric(
@@ -177,17 +177,11 @@ def get_atp_caches(
                 layer_dropped_grad_cache
             )  # dropped_layer list[layer list[examples head seq_len seq_len]]]
 
-    logger.debug(type(grad_drop_collection))
-    logger.debug(type(grad_drop_collection[0]))
-    logger.debug(type(grad_drop_collection[0][0]))
+    logger.debug(grad_drop_collection[3][1])
 
     grad_drop_collection = [
         [inner_value.value for inner_value in value] for value in grad_drop_collection
     ]
-
-    logger.debug(type(grad_drop_collection))
-    logger.debug(type(grad_drop_collection[0]))
-    logger.debug(type(grad_drop_collection[0][0]))
 
     # Convert list of list of tensors into single tensor
     _tensor_grad_drop_collection = [
