@@ -219,20 +219,38 @@ def get_atp_caches(
     def hydrate_intervention_proxy_list(
         proxy_list: Union[list[t.Tensor], list[InterventionProxy]]
     ) -> list[t.Tensor]:
+        """Hydrate with values if the input is a list of InterventionProxies."""
         if type(proxy_list[0]) == t.Tensor:
             return proxy_list  # type: ignore
         return [value.value for value in proxy_list]  # type: ignore
 
-    clean_attn_cache = hydrate_intervention_proxy_list(clean_attn_cache)
-    clean_attn_grad_cache = hydrate_intervention_proxy_list(clean_attn_grad_cache)
-    corrupted_attn_cache = hydrate_intervention_proxy_list(corrupted_attn_cache)
+    def hydrate_all_caches():
+        caches = [
+            clean_attn_cache,
+            clean_attn_grad_cache,
+            corrupted_attn_cache,
+            q_corrupted_cache,
+            k_corrupted_cache,
+            clean_mlp_cache,
+            clean_mlp_grad_cache,
+            corrupted_mlp_cache,
+        ]
 
-    q_corrupted_cache = hydrate_intervention_proxy_list(q_corrupted_cache)
-    k_corrupted_cache = hydrate_intervention_proxy_list(k_corrupted_cache)
+        for i in range(len(caches)):
+            caches[i] = hydrate_intervention_proxy_list(caches[i])
 
-    clean_mlp_cache = hydrate_intervention_proxy_list(clean_mlp_cache)
-    clean_mlp_grad_cache = hydrate_intervention_proxy_list(clean_mlp_grad_cache)
-    corrupted_mlp_cache = hydrate_intervention_proxy_list(corrupted_mlp_cache)
+        return caches
+
+    (
+        clean_attn_cache,
+        clean_attn_grad_cache,
+        corrupted_attn_cache,
+        q_corrupted_cache,
+        k_corrupted_cache,
+        clean_mlp_cache,
+        clean_mlp_grad_cache,
+        corrupted_mlp_cache,
+    ) = hydrate_all_caches()
 
     # grad_drop_cache = [value.value for value in grad_drop_cache]
 
