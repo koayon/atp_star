@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, Union
 
 import torch as t
 from einops import rearrange
 from jaxtyping import Float, Int
 from loguru import logger
 from nnsight import LanguageModel
+from nnsight.contexts import Runner
 from nnsight.intervention import InterventionProxy
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
 
@@ -121,40 +122,13 @@ def get_atp_caches(
                 for i in range(num_layers)
             ]  # type: ignore
 
-        q_corrupted_cache: list = []
-        for i in range(num_layers):
-            with tracer.invoke(clean_tokens) as q_patch_invoker:
-                # Patch the queries with the corrupted queries
-                qkv = model.transformer.h[i].attn.c_attn.output
-                _, k, v = qkv.split(attn.split_size, dim=2)
-                new_qkv = t.cat([flat_corrupted_queries[i], k, v], dim=2)  #  type: ignore
-                model.transformer.h[i].attn.c_attn.output = new_qkv
+        q_corrupted_cache = get_q_corrupted_cache(
+            clean_tokens, model, num_layers, attn, tracer, flat_corrupted_queries
+        )
 
-                # Compute and cache the attention probabilities with the patched queries
-                q_corrupted_cache.append(
-                    model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
-                )
-
-        k_corrupted_cache: list = []
-        # TODO: This is currently the O(n^3) implementation, following Algorithm 4 we can reduce this to O(n^2)
-
-        for i in range(num_layers):
-            # TODO: Note here (and in the q version) we're currently computing the whole forward pass
-            # but we actually only need to compute the forward until the attention probabilities
-            # for the increased speed
-            with tracer.invoke(clean_tokens) as k_patch_invoker:
-                # Patch the keys with the corrupted keys
-                qkv = model.transformer.h[i].attn.c_attn.output
-                q, _, v = qkv.split(attn.split_size, dim=2)
-                new_qkv = t.cat([q, flat_corrupted_keys[i], v], dim=2)  #  type: ignore
-                model.transformer.h[i].attn.c_attn.output = new_qkv
-
-                # Compute and cache the attention probabilities with the patched keys
-                k_corrupted_cache.append(
-                    model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
-                )
-
-                # TODO: Patch back in the clean attention probs
+        k_corrupted_cache = get_k_corrupted_cache(
+            clean_tokens, model, num_layers, attn, tracer, flat_corrupted_keys
+        )
 
         with tracer.invoke(off_distribution_tokens) as off_distribution_invoker:
 
@@ -171,64 +145,26 @@ def get_atp_caches(
             ioi_score.backward(retain_graph=True)
 
         # GradDrop Attention
-        grad_drop_attn_collection: list[list[InterventionProxy]] = []
-        for l in range(num_layers):
-            with tracer.invoke(clean_tokens) as grad_drop_invoker:
-                # Zero out the gradients on each layer from the residual connection
-                model.transformer.h[l].attn.resid_dropout.input[0][0].grad.zero_()
+        grad_drop_attn_collection = cache_grad_drop_attention(
+            clean_tokens,
+            answer_token_indices,
+            model,
+            num_layers,
+            tracer,
+            corrupted_logit_diff,
+            off_distribution_logit_diff,
+        )
 
-                layer_dropped_logits: Float[t.Tensor, "examples seq_len vocab"] = (
-                    model.lm_head.output
-                )  # type: ignore # M(x_clean)
-                layer_dropped_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
-                    layer_dropped_logits, answer_token_indices
-                ).save()  # type: ignore
-
-                # Collect the gradients on the attention probabilities
-                layer_dropped_attn_grad_cache = [
-                    model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
-                    for i in range(num_layers)  # type: ignore
-                ]  # layer list[examples head seq_len seq_len]
-
-                layer_dropped_ioi_score = ioi_metric(
-                    layer_dropped_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
-                )  # scalar
-                layer_dropped_ioi_score.backward(retain_graph=True)
-
-            grad_drop_attn_collection.append(
-                layer_dropped_attn_grad_cache
-            )  # dropped_layer list[layer list[examples head seq_len seq_len]]]
-
-    logger.debug(grad_drop_attn_collection[3][1])
-
-    # GradDrop MLP
-    grad_drop_mlp_collection: list[list[InterventionProxy]] = []
-    for l in range(num_layers):
-        with tracer.invoke(clean_tokens) as grad_drop_invoker:
-            # Zero out the gradients on each layer from the residual connection
-            model.transformer.h[l].mlp.c_proj.output.grad.zero_()
-
-            layer_dropped_logits: Float[t.Tensor, "examples seq_len vocab"] = (
-                model.lm_head.output
-            )  # type: ignore # M(x_clean)
-            layer_dropped_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
-                layer_dropped_logits, answer_token_indices
-            ).save()  # type: ignore
-
-            # Collect the gradients on the attention probabilities
-            layer_dropped_mlp_grad_cache = [
-                model.transformer.h[i].mlp.c_proj.output.grad.save()
-                for i in range(num_layers)  # type: ignore
-            ]  # layer list[examples seq_len]
-
-            layer_dropped_ioi_score = ioi_metric(
-                layer_dropped_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
-            )  # scalar
-            layer_dropped_ioi_score.backward(retain_graph=True)
-
-        grad_drop_mlp_collection.append(
-            layer_dropped_mlp_grad_cache
-        )  # dropped_layer list[layer list[examples seq_len]]]
+        # GradDrop MLP
+        grad_drop_mlp_collection = cache_grad_drop_mlp(
+            clean_tokens,
+            answer_token_indices,
+            model,
+            num_layers,
+            tracer,
+            corrupted_logit_diff,
+            off_distribution_logit_diff,
+        )
 
     grad_drop_attn_collection = [
         [inner_value.value for inner_value in value] for value in grad_drop_attn_collection
@@ -316,3 +252,140 @@ def get_atp_caches(
     ]
 
     return attn_cache, mlp_cache
+
+
+def get_q_corrupted_cache(
+    clean_tokens: Int[t.Tensor, "batch seq"],
+    model: LanguageModel,
+    num_layers: int,
+    attn: GPT2Attention,
+    tracer: Union[Runner, Any],
+    flat_corrupted_queries: list[Union[t.Tensor, InterventionProxy]],
+) -> list[InterventionProxy]:
+    q_corrupted_cache: list = []
+
+    for i in range(num_layers):
+        with tracer.invoke(clean_tokens) as q_patch_invoker:
+            # Patch the queries with the corrupted queries
+            qkv = model.transformer.h[i].attn.c_attn.output
+            _, k, v = qkv.split(attn.split_size, dim=2)
+            new_qkv = t.cat([flat_corrupted_queries[i], k, v], dim=2)  #  type: ignore
+            model.transformer.h[i].attn.c_attn.output = new_qkv
+
+            # Compute and cache the attention probabilities with the patched queries
+            q_corrupted_cache.append(
+                model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
+            )
+
+    return q_corrupted_cache
+
+
+def get_k_corrupted_cache(
+    clean_tokens: Int[t.Tensor, "batch seq"],
+    model: LanguageModel,
+    num_layers: int,
+    attn: GPT2Attention,
+    tracer: Union[Runner, Any],
+    flat_corrupted_keys: list[Union[t.Tensor, InterventionProxy]],
+) -> list[InterventionProxy]:
+    k_corrupted_cache: list = []
+    # TODO: This is currently the O(n^3) implementation, following Algorithm 4 we can reduce this to O(n^2)
+
+    for i in range(num_layers):
+        # TODO: Note here (and in the q version) we're currently computing the whole forward pass
+        # but we actually only need to compute the forward until the attention probabilities
+        # for the increased speed
+        with tracer.invoke(clean_tokens) as k_patch_invoker:
+            # Patch the keys with the corrupted keys
+            qkv = model.transformer.h[i].attn.c_attn.output
+            q, _, v = qkv.split(attn.split_size, dim=2)
+            new_qkv = t.cat([q, flat_corrupted_keys[i], v], dim=2)  #  type: ignore
+            model.transformer.h[i].attn.c_attn.output = new_qkv
+
+            # Compute and cache the attention probabilities with the patched keys
+            k_corrupted_cache.append(
+                model.transformer.h[i].attn.attn_dropout.input[0][0].save()  # type: ignore
+            )
+            # TODO: Patch back in the clean attention probs
+
+    return k_corrupted_cache
+
+
+def cache_grad_drop_attention(
+    clean_tokens: Int[t.Tensor, "batch seq"],
+    answer_token_indices: Int[t.Tensor, "batch 2"],
+    model: LanguageModel,
+    num_layers: int,
+    tracer: Union[Runner, Any],
+    corrupted_logit_diff: Float[t.Tensor, "1"],
+    off_distribution_logit_diff: Float[t.Tensor, "1"],
+) -> list[list[InterventionProxy]]:
+    grad_drop_attn_collection: list[list[InterventionProxy]] = []
+    for l in range(num_layers):
+        with tracer.invoke(clean_tokens) as grad_drop_invoker:
+            # Zero out the gradients on each layer from the residual connection
+            model.transformer.h[l].attn.resid_dropout.input[0][0].grad.zero_()
+
+            layer_dropped_logits: Float[t.Tensor, "examples seq_len vocab"] = (
+                model.lm_head.output
+            )  # type: ignore # M(x_clean)
+            layer_dropped_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
+                layer_dropped_logits, answer_token_indices
+            ).save()  # type: ignore
+
+            # Collect the gradients on the attention probabilities
+            layer_dropped_attn_grad_cache = [
+                model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
+                for i in range(num_layers)  # type: ignore
+            ]  # layer list[examples head seq_len seq_len]
+
+            layer_dropped_ioi_score = ioi_metric(
+                layer_dropped_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
+            )  # scalar
+            layer_dropped_ioi_score.backward(retain_graph=True)
+
+        grad_drop_attn_collection.append(
+            layer_dropped_attn_grad_cache
+        )  # dropped_layer list[layer list[examples head seq_len seq_len]]]
+
+    return grad_drop_attn_collection
+
+
+def cache_grad_drop_mlp(
+    clean_tokens: Int[t.Tensor, "batch seq"],
+    answer_token_indices: Int[t.Tensor, "batch 2"],
+    model: LanguageModel,
+    num_layers: int,
+    tracer: Union[Runner, Any],
+    corrupted_logit_diff: Float[t.Tensor, "1"],
+    off_distribution_logit_diff: Float[t.Tensor, "1"],
+) -> list[list[InterventionProxy]]:
+    grad_drop_mlp_collection: list[list[InterventionProxy]] = []
+    for l in range(num_layers):
+        with tracer.invoke(clean_tokens) as grad_drop_invoker:
+            # Zero out the gradients on each layer from the residual connection
+            model.transformer.h[l].mlp.c_proj.output.grad.zero_()
+
+            layer_dropped_logits: Float[t.Tensor, "examples seq_len vocab"] = (
+                model.lm_head.output
+            )  # type: ignore # M(x_clean)
+            layer_dropped_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
+                layer_dropped_logits, answer_token_indices
+            ).save()  # type: ignore
+
+            # Collect the gradients on the attention probabilities
+            layer_dropped_mlp_grad_cache = [
+                model.transformer.h[i].mlp.c_proj.output.grad.save()
+                for i in range(num_layers)  # type: ignore
+            ]  # layer list[examples seq_len]
+
+            layer_dropped_ioi_score = ioi_metric(
+                layer_dropped_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
+            )  # scalar
+            layer_dropped_ioi_score.backward(retain_graph=True)
+
+        grad_drop_mlp_collection.append(
+            layer_dropped_mlp_grad_cache
+        )  # dropped_layer list[layer list[examples seq_len]]]
+
+    return grad_drop_mlp_collection
