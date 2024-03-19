@@ -177,7 +177,7 @@ def run_atp(
     """
     # model = LanguageModel(model_name, device_map="cpu", dispatch=True)
 
-    attn_cache = get_atp_caches(
+    attn_cache, mlp_cache = get_atp_caches(
         model_name, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
     )
 

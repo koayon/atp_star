@@ -22,13 +22,21 @@ class AttentionLayerCache:
     grad_drop_attn_probs: Optional[t.Tensor] = None
 
 
+@dataclass
+class MLPLayerCache:
+    clean_mlp_output: t.Tensor
+    corrupted_mlp_output: t.Tensor
+    clean_grad_mlp_output: t.Tensor
+    grad_drop_mlp_output: Optional[t.Tensor] = None
+
+
 def get_atp_caches(
     model_name: str,
     clean_tokens: Int[t.Tensor, "examples"],
     corrupted_tokens: Int[t.Tensor, "examples"],
     off_distribution_tokens: Int[t.Tensor, "examples"],
     answer_token_indices: Int[t.Tensor, "examples 2"],
-) -> list[AttentionLayerCache]:
+) -> tuple[list[AttentionLayerCache], list[MLPLayerCache]]:
     """Run the model forward passes on the clean and corrupted tokens and cache the activations.
     We also run a backward pass to cache the gradients on the clean tokens.
 
@@ -64,14 +72,24 @@ def get_atp_caches(
             ).save()  # type: ignore
 
             # Cache the clean activations and gradients for all the nodes
-            clean_cache = [
+            clean_attn_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
                 for i in range(num_layers)  # type: ignore
                 # batch head_index seq_len seq_len
             ]
 
-            clean_grad_cache = [
+            clean_attn_grad_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
+                for i in range(num_layers)  # type: ignore
+            ]
+
+            clean_mlp_cache = [
+                model.transformer.h[i].mlp.c_proj.output.save()
+                for i in range(num_layers)  # type: ignore
+            ]
+
+            clean_mlp_grad_cache = [
+                model.transformer.h[i].mlp.c_proj.output.grad.save()
                 for i in range(num_layers)  # type: ignore
             ]
 
@@ -84,8 +102,13 @@ def get_atp_caches(
             ).save()  # type: ignore
 
             # Cache the corrupted activations and gradients for all the nodes
-            corrupted_cache = [
+            corrupted_attn_cache = [
                 model.transformer.h[i].attn.attn_dropout.input[0][0].save()
+                for i in range(num_layers)  # type: ignore
+            ]
+
+            corrupted_mlp_cache = [
+                model.transformer.h[i].mlp.c_proj.output.save()
                 for i in range(num_layers)  # type: ignore
             ]
 
@@ -149,7 +172,7 @@ def get_atp_caches(
 
         # with model.trace() as tracer:
         # GradDrop
-        grad_drop_collection: list[list[InterventionProxy]] = []
+        grad_drop_attn_collection: list[list[InterventionProxy]] = []
         for l in range(num_layers):
             with tracer.invoke(clean_tokens) as grad_drop_invoker:
                 # Zero out the gradients on each layer from the residual connection
@@ -163,7 +186,7 @@ def get_atp_caches(
                 ).save()  # type: ignore
 
                 # Collect the gradients on the attention probabilities
-                layer_dropped_grad_cache = [
+                layer_dropped_attn_grad_cache = [
                     model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
                     for i in range(num_layers)  # type: ignore
                 ]  # layer list[examples head seq_len seq_len]
@@ -173,31 +196,31 @@ def get_atp_caches(
                 )  # scalar
                 layer_dropped_ioi_score.backward(retain_graph=True)
 
-            grad_drop_collection.append(
-                layer_dropped_grad_cache
+            grad_drop_attn_collection.append(
+                layer_dropped_attn_grad_cache
             )  # dropped_layer list[layer list[examples head seq_len seq_len]]]
 
-    logger.debug(grad_drop_collection[3][1])
+    logger.debug(grad_drop_attn_collection[3][1])
 
-    grad_drop_collection = [
-        [inner_value.value for inner_value in value] for value in grad_drop_collection
+    grad_drop_attn_collection = [
+        [inner_value.value for inner_value in value] for value in grad_drop_attn_collection
     ]
 
     # Convert list of list of tensors into single tensor
-    _tensor_grad_drop_collection = [
-        t.stack(layer, dim=0) for layer in grad_drop_collection  # type: ignore
+    _tensor_grad_drop_attn_collection = [
+        t.stack(layer, dim=0) for layer in grad_drop_attn_collection  # type: ignore
     ]  # dropped_layer list[layer examples head seq_len seq_len]
-    tensor_grad_drop_cache = t.stack(
-        _tensor_grad_drop_collection, dim=0
+    tensor_grad_drop_attn_cache = t.stack(
+        _tensor_grad_drop_attn_collection, dim=0
     )  # dropped_layer layer examples head seq_len seq_len
 
-    tensor_grad_drop_cache = rearrange(
-        tensor_grad_drop_cache,
+    tensor_grad_drop_attn_cache = rearrange(
+        tensor_grad_drop_attn_cache,
         "dropped_layer layer examples head seq_len_dest seq_len_source -> layer dropped_layer examples head seq_len_dest seq_len_source",
     )
 
-    grad_drop_cache = [
-        tensor_grad_drop_cache[i] for i in range(num_layers)  # type: ignore
+    grad_drop_attn_cache = [
+        tensor_grad_drop_attn_cache[i] for i in range(num_layers)  # type: ignore
     ]  # layer list[dropped_layer examples head seq_len seq_len]
 
     ###
@@ -206,25 +229,39 @@ def get_atp_caches(
     logger.debug(corrupted_logit_diff)
     logger.debug(off_distribution_logit_diff)
 
-    clean_cache = [value.value for value in clean_cache]
-    clean_grad_cache = [value.value for value in clean_grad_cache]
-    corrupted_cache = [value.value for value in corrupted_cache]
+    clean_attn_cache = [value.value for value in clean_attn_cache]
+    clean_attn_grad_cache = [value.value for value in clean_attn_grad_cache]
+    corrupted_attn_cache = [value.value for value in corrupted_attn_cache]
 
     q_corrupted_cache = [value.value for value in q_corrupted_cache]
     k_corrupted_cache = [value.value for value in k_corrupted_cache]
+
+    clean_mlp_cache = [value.value for value in clean_mlp_cache]
+    clean_mlp_grad_cache = [value.value for value in clean_mlp_grad_cache]
+    corrupted_mlp_cache = [value.value for value in corrupted_mlp_cache]
 
     # grad_drop_cache = [value.value for value in grad_drop_cache]
 
     attn_cache = [
         AttentionLayerCache(
-            clean_attn_probs=clean_cache[i],
+            clean_attn_probs=clean_attn_cache[i],
             query_corrupted_attn_probs=q_corrupted_cache[i],
             key_corrupted_attn_probs=k_corrupted_cache[i],
-            fully_corrupted_attn_probs=corrupted_cache[i],
-            clean_grad_attn_probabilities=clean_grad_cache[i],
-            grad_drop_attn_probs=grad_drop_cache[i] if grad_drop_cache else None,
+            fully_corrupted_attn_probs=corrupted_attn_cache[i],
+            clean_grad_attn_probabilities=clean_attn_grad_cache[i],
+            grad_drop_attn_probs=grad_drop_attn_cache[i] if grad_drop_attn_cache else None,
         )
-        for i in range(len(clean_cache))
+        for i in range(len(clean_attn_cache))
     ]
 
-    return attn_cache
+    mlp_cache = [
+        MLPLayerCache(
+            clean_mlp_output=clean_mlp_cache[i],
+            corrupted_mlp_output=corrupted_mlp_cache[i],
+            clean_grad_mlp_output=clean_mlp_grad_cache[i],
+            grad_drop_mlp_output=None,
+        )
+        for i in range(len(clean_mlp_cache))
+    ]
+
+    return attn_cache, mlp_cache
