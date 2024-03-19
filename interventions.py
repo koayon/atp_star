@@ -203,7 +203,7 @@ def get_atp_caches(
 
     tensor_grad_drop_mlp_cache = rearrange(
         tensor_grad_drop_mlp_cache,
-        "dropped_layer layer examples seq_pos -> layer dropped_layer examples seq_pos",
+        "dropped_layer layer examples seq_pos hidden_dim -> layer dropped_layer examples seq_pos hidden_dim",
     )
 
     grad_drop_mlp_cache = [
