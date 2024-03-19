@@ -58,15 +58,24 @@ def plot_attention_attributions(
     show_html_in_browser(html_plot)
 
 
-def plot_tensor_2d(input: t.Tensor) -> None:
+def plot_tensor_2d(input: t.Tensor, title: str, sequence_positions: list[str]) -> None:
     # Convert the PyTorch tensor to a numpy array
     input_np = input.detach().numpy()
 
-    # Use seaborn to create a heatmap
-    sns.heatmap(input_np)
+    fig = go.Figure()
+    fig.add_trace(go.Heatmap(z=input_np))
 
-    # Display the plot
-    plt.show()
+    fig.update_layout(
+        title=title,
+        xaxis=dict(
+            title="Sequence Position",
+            tickvals=list(range(len(sequence_positions))),
+            ticktext=sequence_positions,
+        ),
+        yaxis=dict(title="Layer"),
+    )
+
+    fig.show(renderer="browser")
 
 
 def plot_tensor_3d(
@@ -106,10 +115,6 @@ def plot_tensor_3d(
             )
         ]
     )
-
-    # Set axis titles
-    # fig.update_xaxes(title_text="Sequence Position")
-    # fig.update_yaxes(title_text="Head")
 
     fig.update_layout(
         title=title,
