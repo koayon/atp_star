@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import torch as t
 from jaxtyping import Float, Int
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 
 
 @dataclass
@@ -15,7 +15,7 @@ class PromptSet:
 
 
 class PromptStore(list[PromptSet]):
-    def __init__(self, prompts: list[PromptSet], tokeniser: PreTrainedTokenizer):
+    def __init__(self, prompts: list[PromptSet], tokeniser: PreTrainedTokenizerBase):
         super().__init__(prompts)
         self.tokeniser = tokeniser
 
@@ -92,7 +92,7 @@ class PromptStore(list[PromptSet]):
         )
 
 
-def build_prompt_store(tokeniser: PreTrainedTokenizer) -> PromptStore:
+def build_prompt_store(tokeniser: PreTrainedTokenizerBase) -> PromptStore:
     return PromptStore(
         [
             PromptSet(
