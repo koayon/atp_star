@@ -45,13 +45,13 @@ def get_atp_caches(
     model : LanguageModel
     clean_tokens : Int[t.Tensor, "examples"]
     corrupted_tokens : Int[t.Tensor, "examples"]
+    off_distribution_tokens : Int[t.Tensor, "examples"]
     answer_token_indices : Int[t.Tensor, "examples, 2"]
 
     Returns
     -------
-    clean_cache : list[t.Tensor]
-    corrupted_cache : list[t.Tensor]
-    clean_grad_cache : list[t.Tensor]
+    attn_cache : list[AttentionLayerCache]
+    mlp_cache : list[MLPLayerCache]
 
     """
     model = LanguageModel(model_name, device_map="cpu", dispatch=True)
@@ -170,8 +170,7 @@ def get_atp_caches(
 
             ioi_score.backward(retain_graph=True)
 
-        # with model.trace() as tracer:
-        # GradDrop
+        # GradDrop Attention
         grad_drop_attn_collection: list[list[InterventionProxy]] = []
         for l in range(num_layers):
             with tracer.invoke(clean_tokens) as grad_drop_invoker:
@@ -202,6 +201,35 @@ def get_atp_caches(
 
     logger.debug(grad_drop_attn_collection[3][1])
 
+    # GradDrop MLP
+    grad_drop_mlp_collection: list[list[InterventionProxy]] = []
+    for l in range(num_layers):
+        with tracer.invoke(clean_tokens) as grad_drop_invoker:
+            # Zero out the gradients on each layer from the residual connection
+            model.transformer.h[l].mlp.c_proj.output.grad.zero_()
+
+            layer_dropped_logits: Float[t.Tensor, "examples seq_len vocab"] = (
+                model.lm_head.output
+            )  # type: ignore # M(x_clean)
+            layer_dropped_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
+                layer_dropped_logits, answer_token_indices
+            ).save()  # type: ignore
+
+            # Collect the gradients on the attention probabilities
+            layer_dropped_mlp_grad_cache = [
+                model.transformer.h[i].mlp.c_proj.output.grad.save()
+                for i in range(num_layers)  # type: ignore
+            ]  # layer list[examples seq_len]
+
+            layer_dropped_ioi_score = ioi_metric(
+                layer_dropped_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
+            )  # scalar
+            layer_dropped_ioi_score.backward(retain_graph=True)
+
+        grad_drop_mlp_collection.append(
+            layer_dropped_mlp_grad_cache
+        )  # dropped_layer list[layer list[examples seq_len]]]
+
     grad_drop_attn_collection = [
         [inner_value.value for inner_value in value] for value in grad_drop_attn_collection
     ]
@@ -222,6 +250,29 @@ def get_atp_caches(
     grad_drop_attn_cache = [
         tensor_grad_drop_attn_cache[i] for i in range(num_layers)  # type: ignore
     ]  # layer list[dropped_layer examples head seq_len seq_len]
+
+    ###
+
+    grad_drop_mlp_collection = [
+        [inner_value.value for inner_value in value] for value in grad_drop_mlp_collection
+    ]
+
+    # Convert list of list of tensors into single tensor
+    _tensor_grad_drop_mlp_collection = [
+        t.stack(layer, dim=0) for layer in grad_drop_mlp_collection  # type: ignore
+    ]  # dropped_layer list[layer examples seq_len]
+    tensor_grad_drop_mlp_cache = t.stack(
+        _tensor_grad_drop_mlp_collection, dim=0
+    )  # dropped_layer layer examples seq_len
+
+    tensor_grad_drop_mlp_cache = rearrange(
+        tensor_grad_drop_mlp_cache,
+        "dropped_layer layer examples seq_pos -> layer dropped_layer examples seq_pos",
+    )
+
+    grad_drop_mlp_cache = [
+        tensor_grad_drop_mlp_cache[i] for i in range(num_layers)  # type: ignore
+    ]  # layer list[dropped_layer examples seq_pos]
 
     ###
 
@@ -259,7 +310,7 @@ def get_atp_caches(
             clean_mlp_output=clean_mlp_cache[i],
             corrupted_mlp_output=corrupted_mlp_cache[i],
             clean_grad_mlp_output=clean_mlp_grad_cache[i],
-            grad_drop_mlp_output=None,
+            grad_drop_mlp_output=grad_drop_mlp_cache[i] if grad_drop_mlp_cache else None,
         )
         for i in range(len(clean_mlp_cache))
     ]
