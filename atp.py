@@ -7,6 +7,7 @@ from einops import einsum, rearrange
 from jaxtyping import Float, Int
 from loguru import logger
 from nnsight import LanguageModel
+from nnsight.intervention import InterventionProxy
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
 
 from helpers import get_num_layers_heads, ioi_metric, mean_logit_diff
@@ -162,6 +163,7 @@ def run_atp(
     corrupted_tokens: Int[t.Tensor, "examples"],
     off_distribution_tokens: Int[t.Tensor, "examples"],
     answer_token_indices: Int[t.Tensor, "examples 2"],
+    use_grad_drop: bool = False,
 ) -> list[t.Tensor]:
     """Run the ATP algorithm (Nanda 2022).
     Optionally specify improvements to the algorithm (known as AtP*)
@@ -193,7 +195,8 @@ def run_atp(
     )
 
     atp_component_contributions: list[t.Tensor] = [
-        atp_component_contribution(attn_cache[i]) for i in range(len(attn_cache))
+        atp_component_contribution(attn_cache[i], use_grad_drop=use_grad_drop)
+        for i in range(len(attn_cache))
     ]  # layer list[head]
     return atp_component_contributions
 
@@ -231,7 +234,7 @@ def get_atp_caches(
 
             # Calculate L(M(x_clean))
             clean_logits: Float[t.Tensor, "examples seq_len vocab"] = (
-                model.lm_head.output
+                model.lm_head.output.save()
             )  # type: ignore # M(x_clean)
             clean_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
                 clean_logits, answer_token_indices
@@ -282,20 +285,6 @@ def get_atp_caches(
                 for i in range(num_layers)
             ]  # type: ignore
 
-        with tracer.invoke(off_distribution_tokens) as off_distribution_invoker:
-
-            # Calculate L(M(x_corrupted))
-            off_distribution_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output  # type: ignore
-            off_distribution_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
-                off_distribution_logits, answer_token_indices
-            ).save()  # type: ignore
-
-            ioi_score = ioi_metric(
-                clean_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
-            )  # scalar
-
-            ioi_score.backward()
-
         q_corrupted_cache: list = []
         for i in range(num_layers):
             with tracer.invoke(clean_tokens) as q_patch_invoker:
@@ -331,34 +320,80 @@ def get_atp_caches(
 
                 # TODO: Patch back in the clean attention probs
 
+        with tracer.invoke(off_distribution_tokens) as off_distribution_invoker:
+
+            # Calculate L(M(x_corrupted))
+            off_distribution_logits: Float[t.Tensor, "examples seq_len vocab"] = model.lm_head.output.save()  # type: ignore
+            off_distribution_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
+                off_distribution_logits, answer_token_indices
+            ).save()  # type: ignore
+
+            ioi_score = ioi_metric(
+                clean_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
+            )  # scalar
+
+            ioi_score.backward(retain_graph=True)
+
+        # with model.trace() as tracer:
         # GradDrop
-        grad_drop_collection: list = []
+        grad_drop_collection: list[list[InterventionProxy]] = []
         for l in range(num_layers):
             with tracer.invoke(clean_tokens) as grad_drop_invoker:
                 # Zero out the gradients on each layer from the residual connection
                 model.transformer.h[l].attn.resid_dropout.input[0][0].grad.zero_()
 
+                layer_dropped_logits: Float[t.Tensor, "examples seq_len vocab"] = (
+                    model.lm_head.output
+                )  # type: ignore # M(x_clean)
+                layer_dropped_logit_diff: Float[t.Tensor, "1"] = mean_logit_diff(
+                    layer_dropped_logits, answer_token_indices
+                ).save()  # type: ignore
+
                 # Collect the gradients on the attention probabilities
-                grad_cache_layer_dropped = [
+                layer_dropped_grad_cache = [
                     model.transformer.h[i].attn.attn_dropout.input[0][0].grad.save()
-                    for i in range(num_layers)  # type: ignore
+                    for i in range(len(model.transformer.h))  # type: ignore
                 ]  # layer list[examples head seq_len seq_len]
-                grad_drop_collection.append(
-                    t.stack(grad_cache_layer_dropped, dim=0)  # type: ignore
-                )  # dropped_layer list[layer examples head seq_len seq_len]]
 
-        tensor_grad_drop_cache = t.stack(
-            grad_drop_collection, dim=0
-        )  # dropped_layer layer examples head seq_len seq_len
+                layer_dropped_ioi_score = ioi_metric(
+                    layer_dropped_logit_diff, corrupted_logit_diff, off_distribution_logit_diff
+                )  # scalar
+                layer_dropped_ioi_score.backward(retain_graph=True)
 
-        tensor_grad_drop_cache = rearrange(
-            tensor_grad_drop_cache,
-            "dropped_layer layer examples head seq_len_dest seq_len_source -> layer dropped_layer examples head seq_len_dest seq_len_source",
-        )
+            grad_drop_collection.append(
+                layer_dropped_grad_cache
+            )  # dropped_layer list[layer list[examples head seq_len seq_len]]]
 
-        grad_drop_cache = [
-            tensor_grad_drop_cache[i] for i in range(num_layers)
-        ]  # layer list[dropped_layer examples head seq_len seq_len]
+    logger.debug(type(grad_drop_collection))
+    logger.debug(type(grad_drop_collection[0]))
+    logger.debug(type(grad_drop_collection[0][0]))
+
+    grad_drop_collection = [
+        [inner_value.value for inner_value in value] for value in grad_drop_collection
+    ]
+
+    logger.debug(type(grad_drop_collection))
+    logger.debug(type(grad_drop_collection[0]))
+    logger.debug(type(grad_drop_collection[0][0]))
+
+    # Convert list of list of tensors into single tensor
+    _tensor_grad_drop_collection = [
+        t.stack(layer, dim=0) for layer in grad_drop_collection  # type: ignore
+    ]  # dropped_layer list[layer examples head seq_len seq_len]
+    tensor_grad_drop_cache = t.stack(
+        _tensor_grad_drop_collection, dim=0
+    )  # dropped_layer layer examples head seq_len seq_len
+
+    tensor_grad_drop_cache = rearrange(
+        tensor_grad_drop_cache,
+        "dropped_layer layer examples head seq_len_dest seq_len_source -> layer dropped_layer examples head seq_len_dest seq_len_source",
+    )
+
+    grad_drop_cache = [
+        tensor_grad_drop_cache[i] for i in range(num_layers)  # type: ignore
+    ]  # layer list[dropped_layer examples head seq_len seq_len]
+
+    ###
 
     logger.debug(clean_logit_diff)
     logger.debug(corrupted_logit_diff)
@@ -371,7 +406,7 @@ def get_atp_caches(
     q_corrupted_cache = [value.value for value in q_corrupted_cache]
     k_corrupted_cache = [value.value for value in k_corrupted_cache]
 
-    grad_drop_cache = [value for value in grad_drop_cache]
+    # grad_drop_cache = [value.value for value in grad_drop_cache]
 
     attn_cache = [
         AttentionLayerCache(
@@ -389,16 +424,18 @@ def get_atp_caches(
 
 
 def main():
-    logger.remove()
-    logger.add(sys.stdout, level="INFO")
-
     prompt_store = build_prompt_store(tokeniser)
     clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices = (
         prompt_store.prepare_tokens_and_indices()
     )
 
     atp_component_contributions = run_atp(
-        model, clean_tokens, corrupted_tokens, off_distribution_tokens, answer_token_indices
+        model,
+        clean_tokens,
+        corrupted_tokens,
+        off_distribution_tokens,
+        answer_token_indices,
+        use_grad_drop=True,
     )
 
     attn_contributions_tensor = t.stack(atp_component_contributions, dim=0)  # layer head seq_len
@@ -419,6 +456,8 @@ def main():
 
 
 if __name__ == "__main__":
+    logger.remove()
+    logger.add(sys.stdout, level="INFO")
 
     model = LanguageModel("openai-community/gpt2", device_map="cpu", dispatch=True)
     # model = LanguageModel("delphi-suite/v0-llama2-100k", device_map="mps", dispatch=True)
