@@ -37,6 +37,7 @@ def get_atp_caches(
     corrupted_tokens: Int[t.Tensor, "examples"],
     off_distribution_tokens: Int[t.Tensor, "examples"],
     answer_token_indices: Int[t.Tensor, "examples 2"],
+    testing: bool = False,
 ) -> tuple[list[AttentionLayerCache], list[MLPLayerCache]]:
     """Run the model forward passes on the clean and corrupted tokens and cache the activations.
     We also run a backward pass to cache the gradients on the clean tokens.
@@ -153,6 +154,7 @@ def get_atp_caches(
             tracer,
             corrupted_logit_diff,
             off_distribution_logit_diff,
+            testing=testing,
         )
 
         # GradDrop MLP
@@ -164,6 +166,7 @@ def get_atp_caches(
             tracer,
             corrupted_logit_diff,
             off_distribution_logit_diff,
+            testing=testing,
         )
 
     grad_drop_attn_collection = [
@@ -344,9 +347,13 @@ def cache_grad_drop_attention(
     tracer: Union[Runner, Any],
     corrupted_logit_diff: Float[t.Tensor, "1"],
     off_distribution_logit_diff: Float[t.Tensor, "1"],
+    testing: bool,
 ) -> list[list[InterventionProxy]]:
     grad_drop_attn_collection: list[list[InterventionProxy]] = []
-    for l in range(num_layers):
+
+    num_drop_layers = 2 if testing else num_layers
+
+    for l in range(num_drop_layers):
         with tracer.invoke(clean_tokens) as grad_drop_invoker:
             # Zero out the gradients on each layer from the residual connection
             model.transformer.h[l].attn.resid_dropout.input[0][0].grad.zero_()
@@ -384,9 +391,13 @@ def cache_grad_drop_mlp(
     tracer: Union[Runner, Any],
     corrupted_logit_diff: Float[t.Tensor, "1"],
     off_distribution_logit_diff: Float[t.Tensor, "1"],
+    testing: bool,
 ) -> list[list[InterventionProxy]]:
     grad_drop_mlp_collection: list[list[InterventionProxy]] = []
-    for l in range(num_layers):
+
+    num_drop_layers = 2 if testing else num_layers
+
+    for l in range(num_drop_layers):
         with tracer.invoke(clean_tokens) as grad_drop_invoker:
             # Zero out the gradients on each layer from the residual connection
             model.transformer.h[l].mlp.c_proj.output.grad.zero_()
