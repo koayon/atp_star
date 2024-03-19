@@ -216,16 +216,23 @@ def get_atp_caches(
     logger.debug(corrupted_logit_diff)
     logger.debug(off_distribution_logit_diff)
 
-    clean_attn_cache = [value.value for value in clean_attn_cache]
-    clean_attn_grad_cache = [value.value for value in clean_attn_grad_cache]
-    corrupted_attn_cache = [value.value for value in corrupted_attn_cache]
+    def hydrate_intervention_proxy_list(
+        proxy_list: Union[list[t.Tensor], list[InterventionProxy]]
+    ) -> list[t.Tensor]:
+        if type(proxy_list[0]) == t.Tensor:
+            return proxy_list  # type: ignore
+        return [value.value for value in proxy_list]  # type: ignore
 
-    q_corrupted_cache = [value.value for value in q_corrupted_cache]
-    k_corrupted_cache = [value.value for value in k_corrupted_cache]
+    clean_attn_cache = hydrate_intervention_proxy_list(clean_attn_cache)
+    clean_attn_grad_cache = hydrate_intervention_proxy_list(clean_attn_grad_cache)
+    corrupted_attn_cache = hydrate_intervention_proxy_list(corrupted_attn_cache)
 
-    clean_mlp_cache = [value.value for value in clean_mlp_cache]
-    clean_mlp_grad_cache = [value.value for value in clean_mlp_grad_cache]
-    corrupted_mlp_cache = [value.value for value in corrupted_mlp_cache]
+    q_corrupted_cache = hydrate_intervention_proxy_list(q_corrupted_cache)
+    k_corrupted_cache = hydrate_intervention_proxy_list(k_corrupted_cache)
+
+    clean_mlp_cache = hydrate_intervention_proxy_list(clean_mlp_cache)
+    clean_mlp_grad_cache = hydrate_intervention_proxy_list(clean_mlp_grad_cache)
+    corrupted_mlp_cache = hydrate_intervention_proxy_list(corrupted_mlp_cache)
 
     # grad_drop_cache = [value.value for value in grad_drop_cache]
 
