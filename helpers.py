@@ -1,6 +1,5 @@
 import torch as t
 from jaxtyping import Float, Int
-from loguru import logger
 from nnsight import LanguageModel
 
 
