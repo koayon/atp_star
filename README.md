@@ -12,9 +12,9 @@ Thanks to Jaden and the nnsight team for the `nnsight` package that is used for 
 
 Thanks to Alice and the MechInterp Discord for the discussions and feedback.
 
-## Usage
+## Contributions
 
-TODO
+Contributions are welcome, please feel free to raise PRs to implement additional features you're interested in! 😄
 
 ## Progress
 
